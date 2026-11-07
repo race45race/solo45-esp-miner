@@ -26,6 +26,10 @@
 
 #define ASIC_REDUCTION 100.0
 
+// One bad sensor read must not trigger safe mode: the chip has to read hot for this long.
+#define ASIC_OVERHEAT_CONFIRM_MS 3000
+#define ASIC_OVERHEAT_CONFIRM_POLLS (ASIC_OVERHEAT_CONFIRM_MS / POLL_RATE)
+
 static const char * TAG = "power_management";
 
 static void mining_stop(GlobalState * GLOBAL_STATE)
@@ -124,6 +128,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
     uint16_t last_known_asic_voltage = 0;
     float last_known_asic_frequency = 0.0;
     bool is_paused = false;
+    uint16_t asic_overheat_polls = 0;
 
     while (1) {
         if (GLOBAL_STATE->SELF_TEST_MODULE.is_finished) {
@@ -160,13 +165,24 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             power_management->chip_temp_avg > THROTTLE_TEMP
             || power_management->chip_temp2_avg > THROTTLE_TEMP;
 
-        if ((power_management->vr_temp > TPS546_THROTTLE_TEMP || asic_overheat) && (power_management->frequency_value > 50 || power_management->voltage > 1000)) {
+        if (!asic_overheat) {
+            if (asic_overheat_polls > 0) {
+                ESP_LOGW(TAG, "Ignored a brief high chip reading (%u polls)", asic_overheat_polls);
+            }
+            asic_overheat_polls = 0;
+        } else if (asic_overheat_polls < ASIC_OVERHEAT_CONFIRM_POLLS) {
+            asic_overheat_polls++;
+        }
+        bool asic_overheat_confirmed = asic_overheat_polls >= ASIC_OVERHEAT_CONFIRM_POLLS;
+
+        if ((power_management->vr_temp > TPS546_THROTTLE_TEMP || asic_overheat_confirmed) && (power_management->frequency_value > 50 || power_management->voltage > 1000)) {
             if (power_management->chip_temp2_avg > 0) {
                 ESP_LOGE(TAG, "OVERHEAT! VR: %fC ASIC1: %fC ASIC2: %fC", power_management->vr_temp, power_management->chip_temp_avg, power_management->chip_temp2_avg);
             } else {
                 ESP_LOGE(TAG, "OVERHEAT! VR: %fC ASIC: %fC", power_management->vr_temp, power_management->chip_temp_avg);
             }
 
+            asic_overheat_polls = 0;
             last_known_asic_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
             last_known_asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
             nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, false);
