@@ -10,6 +10,7 @@
 #include "create_jobs_task.h"
 #include "hashrate_monitor_task.h"
 #include "fan_controller_task.h"
+#include "autotune_task.h"
 #include "statistics_task.h"
 #include "global_state.h"
 #include "system.h"
@@ -164,6 +165,9 @@ void app_main(void)
         if (!GLOBAL_STATE.SELF_TEST_MODULE.is_active) {
             if (xTaskCreate(FAN_CONTROLLER_task, "fan_controller", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
                 ESP_LOGE(TAG, "Error creating fan controller task");
+            }
+            if (xTaskCreateWithCaps(AUTOTUNE_task, "solo45 autotune", 6144, (void *) &GLOBAL_STATE, 4, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+                ESP_LOGE(TAG, "Error creating autotune task");
             }
         }
     } else {

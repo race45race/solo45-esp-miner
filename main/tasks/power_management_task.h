@@ -19,6 +19,11 @@ typedef struct
     float current;
     float core_voltage;
     float throttle_mhz; // Solo45 heat throttle: MHz below the set frequency right now (0 = not throttling)
+    // Solo45 auto-tuner: while tune_active, these RAM-only values replace the
+    // saved frequency and voltage (and the heat throttle stands aside).
+    bool tune_active;
+    float tune_freq;
+    uint16_t tune_mv;
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(GlobalState * GLOBAL_STATE);

@@ -19,6 +19,7 @@
 #include "statistics_task.h"
 #include "stratum_v2_task.h"
 #include "asic.h"
+#include "autotune_task.h"
 
 
 static const char *get_reset_reason_str(esp_reset_reason_t reason)
@@ -103,6 +104,7 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddBoolToObject(root, "miningPaused", g->SYSTEM_MODULE.mining_paused);
     cJSON_AddNumberToObject(root, "overheat_mode", g->SYSTEM_MODULE.overheat_mode ? 1 : 0);
     cJSON_AddNumberToObject(root, "solo45ThrottleMhz", g->POWER_MANAGEMENT_MODULE.throttle_mhz);
+    AUTOTUNE_add_json(root);
     cJSON_AddStringToObject(root, "wifiStatus", g->SYSTEM_MODULE.wifi_status);
 
     int8_t rssi = -90;

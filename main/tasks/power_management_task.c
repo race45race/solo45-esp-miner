@@ -277,8 +277,20 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                  ? GLOBAL_STATE-> DEVICE_CONFIG.family.asic.default_frequency_mhz
                                  : nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
 
+        // ---- Solo45 auto-tuner override (RAM only) ----
+        bool tuning = power_management->tune_active && !GLOBAL_STATE->SELF_TEST_MODULE.is_active;
+        if (tuning) {
+            asic_frequency = power_management->tune_freq;
+            core_voltage = power_management->tune_mv;
+            throttle_set_frequency = 0.0f; // the throttle starts clean after the tune
+        }
+
         // ---- Solo45 heat throttle ----
-        if (asic_frequency != throttle_set_frequency) {
+        if (tuning) {
+            throttle_steps = 0;
+            throttle_hot_polls = 0;
+            throttle_cool_polls = 0;
+        } else if (asic_frequency != throttle_set_frequency) {
             // A new setting (from the user, or the safe-mode reduction) starts clean.
             throttle_set_frequency = asic_frequency;
             throttle_steps = 0;
@@ -286,8 +298,8 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             throttle_cool_polls = 0;
         }
         bool auto_fan = nvs_config_get_bool(NVS_CONFIG_AUTO_FAN_SPEED);
-        if (GLOBAL_STATE->SELF_TEST_MODULE.is_active || !auto_fan) {
-            // Manual fan or self-test: the user (or the test) is in charge.
+        if (tuning || GLOBAL_STATE->SELF_TEST_MODULE.is_active || !auto_fan) {
+            // Tuning, manual fan or self-test: the tuner, the user or the test is in charge.
             if (throttle_steps > 0) {
                 ESP_LOGI(TAG, "Heat throttle off (auto fan off or self-test)");
             }

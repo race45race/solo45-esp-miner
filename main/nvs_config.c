@@ -127,6 +127,13 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_TPS546_SYNC_CONFIG]                    = {.nvs_key_name = "tps546_sync",    .type = TYPE_U16},
     [NVS_CONFIG_TPS546_FREQUENCY]                      = {.nvs_key_name = "tps546_freq",    .type = TYPE_U16},
     [NVS_CONFIG_NOMINAL_VOLTAGE]                       = {.nvs_key_name = "nominal_voltage", .type = TYPE_U16},
+
+    // Solo45 auto-tuner. Mode: 0 idle/stop, 1 most hashrate within the power limit, 2 best J/TH.
+    // 0 in a limit means "the default for this board" (top voltage option + 50 mV, 90% of max power, 1.0% errors).
+    [NVS_CONFIG_SOLO45_TUNE_MODE]                      = {.nvs_key_name = "s45tunemode",     .type = TYPE_U16,   .default_value = {.u16 = 0},                                           .rest_name = "solo45TuneMode",                     .min = 0,  .max = 2},
+    [NVS_CONFIG_SOLO45_TUNE_MAX_MV]                    = {.nvs_key_name = "s45tunemaxmv",    .type = TYPE_U16,   .default_value = {.u16 = 0},                                           .rest_name = "solo45TuneMaxMv",                    .min = 0,  .max = 1400},
+    [NVS_CONFIG_SOLO45_TUNE_MAX_W]                     = {.nvs_key_name = "s45tunemaxw",     .type = TYPE_U16,   .default_value = {.u16 = 0},                                           .rest_name = "solo45TuneMaxW",                     .min = 0,  .max = 400},
+    [NVS_CONFIG_SOLO45_TUNE_MAX_ERR]                   = {.nvs_key_name = "s45tunemaxerr",   .type = TYPE_U16,   .default_value = {.u16 = 0},                                           .rest_name = "solo45TuneMaxErr",                   .min = 0,  .max = 50},
 };
 
 Settings *nvs_config_get_settings(NvsConfigKey key)
