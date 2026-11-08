@@ -30,6 +30,25 @@
 #define ASIC_OVERHEAT_CONFIRM_MS 3000
 #define ASIC_OVERHEAT_CONFIRM_POLLS (ASIC_OVERHEAT_CONFIRM_MS / POLL_RATE)
 
+// Solo45 heat throttle. When the auto fan is flat out and the chip is still
+// over its target (or the regulator runs hot), run 25 MHz below the set
+// frequency, one step at a time; step back up once it has been cool for a
+// while. The frequency saved in NVS is never changed, so the user's setting
+// comes back by itself. This works well below the 75 C / 105 C safe-mode trips.
+#define THROTTLE_STEP_MHZ 25.0f
+#define THROTTLE_MAX_STEPS 8                   // at most 200 MHz below the setting
+#define THROTTLE_FLOOR_MHZ 400.0f              // never throttle below this
+#define THROTTLE_FAN_FULL 95.0f                // fan % that counts as "nothing left"
+#define THROTTLE_HOT_MARGIN 1.5f               // chip this far over target = hot
+// The auto fan holds the chip at its target by turning down, so "cool" is
+// read from the fan: plenty of fan left with the chip at or under target.
+#define THROTTLE_COOL_MARGIN 1.0f              // chip at most this far over target...
+#define THROTTLE_FAN_EASY 75.0f                // ...with the fan below this = cool
+#define THROTTLE_VR_HOT 95.0f                  // regulator hot, whatever the fan does
+#define THROTTLE_VR_COOL 85.0f
+#define THROTTLE_DOWN_POLLS (45000 / POLL_RATE)  // ~45 s hot before each step down
+#define THROTTLE_UP_POLLS (300000 / POLL_RATE)   // 5 min cool before each step up
+
 static const char * TAG = "power_management";
 
 static void mining_stop(GlobalState * GLOBAL_STATE)
@@ -130,6 +149,12 @@ void POWER_MANAGEMENT_task(void * pvParameters)
     bool is_paused = false;
     uint16_t asic_overheat_polls = 0;
 
+    uint8_t throttle_steps = 0;
+    uint16_t throttle_hot_polls = 0;
+    uint16_t throttle_cool_polls = 0;
+    float throttle_set_frequency = 0.0f; // the NVS frequency the steps were counted from
+    power_management->throttle_mhz = 0.0f;
+
     while (1) {
         if (GLOBAL_STATE->SELF_TEST_MODULE.is_finished) {
             ESP_LOGI(TAG, "Stopped");
@@ -152,6 +177,9 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             is_paused = true;
         } else if (!wants_stop && is_paused) {
             mining_start(GLOBAL_STATE);
+            // mining_start ran the chip at the full NVS frequency; note that,
+            // so a throttle still in force is applied again below.
+            last_asic_frequency = power_management->frequency_value;
             is_paused = false;
         }
 
@@ -233,6 +261,7 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                      reduced_voltage, last_known_asic_voltage, reduced_asic_frequency, last_known_asic_frequency);
 
             uint8_t chip_count = mining_start(GLOBAL_STATE);
+            last_asic_frequency = power_management->frequency_value;
 
             if (chip_count > 0) {
                 // Frequency reduction will now be applied by normal power management loop
@@ -247,6 +276,67 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         float asic_frequency = GLOBAL_STATE->SELF_TEST_MODULE.is_active
                                  ? GLOBAL_STATE-> DEVICE_CONFIG.family.asic.default_frequency_mhz
                                  : nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+
+        // ---- Solo45 heat throttle ----
+        if (asic_frequency != throttle_set_frequency) {
+            // A new setting (from the user, or the safe-mode reduction) starts clean.
+            throttle_set_frequency = asic_frequency;
+            throttle_steps = 0;
+            throttle_hot_polls = 0;
+            throttle_cool_polls = 0;
+        }
+        bool auto_fan = nvs_config_get_bool(NVS_CONFIG_AUTO_FAN_SPEED);
+        if (GLOBAL_STATE->SELF_TEST_MODULE.is_active || !auto_fan) {
+            // Manual fan or self-test: the user (or the test) is in charge.
+            if (throttle_steps > 0) {
+                ESP_LOGI(TAG, "Heat throttle off (auto fan off or self-test)");
+            }
+            throttle_steps = 0;
+            throttle_hot_polls = 0;
+            throttle_cool_polls = 0;
+        } else {
+            float chip_max = power_management->chip_temp_avg > power_management->chip_temp2_avg
+                                 ? power_management->chip_temp_avg
+                                 : power_management->chip_temp2_avg;
+            float target = (float) nvs_config_get_u16(NVS_CONFIG_TEMP_TARGET);
+            bool valid = chip_max > 0;
+            bool hot = valid && ((power_management->fan_perc >= THROTTLE_FAN_FULL && chip_max > target + THROTTLE_HOT_MARGIN)
+                                 || power_management->vr_temp > THROTTLE_VR_HOT);
+            bool cool = valid && chip_max <= target + THROTTLE_COOL_MARGIN
+                        && power_management->fan_perc < THROTTLE_FAN_EASY
+                        && power_management->vr_temp < THROTTLE_VR_COOL;
+
+            if (hot) {
+                throttle_cool_polls = 0;
+                if (++throttle_hot_polls >= THROTTLE_DOWN_POLLS) {
+                    throttle_hot_polls = 0;
+                    float next = asic_frequency - (throttle_steps + 1) * THROTTLE_STEP_MHZ;
+                    if (throttle_steps < THROTTLE_MAX_STEPS && next >= THROTTLE_FLOOR_MHZ) {
+                        throttle_steps++;
+                        ESP_LOGW(TAG, "Heat throttle: %.0f MHz (set %.0f). Chip %.1fC, target %.0fC, fan %.0f%%, VR %.1fC",
+                                 next, asic_frequency, chip_max, target, power_management->fan_perc, power_management->vr_temp);
+                    }
+                }
+            } else {
+                // A hot spell is not erased by one cool reading near the line.
+                if (throttle_hot_polls > 0) {
+                    throttle_hot_polls--;
+                }
+                if (cool && throttle_steps > 0) {
+                    if (++throttle_cool_polls >= THROTTLE_UP_POLLS) {
+                        throttle_cool_polls = 0;
+                        throttle_steps--;
+                        ESP_LOGI(TAG, "Heat throttle: back up to %.0f MHz (set %.0f). Chip %.1fC, fan %.0f%%",
+                                 asic_frequency - throttle_steps * THROTTLE_STEP_MHZ, asic_frequency, chip_max, power_management->fan_perc);
+                    }
+                } else {
+                    throttle_cool_polls = 0;
+                }
+            }
+        }
+        power_management->throttle_mhz = throttle_steps * THROTTLE_STEP_MHZ;
+        asic_frequency -= power_management->throttle_mhz;
+        // ---- end heat throttle ----
 
         if (core_voltage != last_core_voltage) {
             ESP_LOGI(TAG, "setting new vcore voltage to %umV", core_voltage);

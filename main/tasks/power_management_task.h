@@ -18,6 +18,7 @@ typedef struct
     float power;
     float current;
     float core_voltage;
+    float throttle_mhz; // Solo45 heat throttle: MHz below the set frequency right now (0 = not throttling)
 } PowerManagementModule;
 
 void POWER_MANAGEMENT_init_frequency(GlobalState * GLOBAL_STATE);
