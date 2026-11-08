@@ -17,6 +17,13 @@
 #define PID_I 0.1
 #define PID_D 2.0
 
+// Solo45: the auto fan also watches the voltage regulator. Above VR_FAN_START_C
+// the fan gets a floor that rises to 100% at VR_FAN_FULL_C; the chip-temperature
+// PID still runs and wins whenever it asks for more. Stock firmware steers on
+// the chip alone, which let a Hex's VR reach ~80 C with the fan at ~50%.
+#define VR_FAN_START_C 75.0f
+#define VR_FAN_FULL_C 95.0f
+
 static const char * TAG = "fan_controller";
 static const char * prev_context = "";
 
@@ -115,12 +122,23 @@ void FAN_CONTROLLER_task(void * pvParameters)
                     // Uncomment for debugging PID output directly after compute
                     // ESP_LOGD(TAG, "DEBUG: PID raw output: %.2f%%, Input: %.1f, SetPoint: %.1f", pid_output, pid_input, pid_setPoint);
 
-                    update_fan_speed(GLOBAL_STATE, pid_output, "Auto");
+                    float fan_out = pid_output;
+                    float vr = power_management->vr_temp;
+                    float vr_floor = 0.0f;
+                    if (vr > VR_FAN_START_C) {
+                        vr_floor = (vr - VR_FAN_START_C) / (VR_FAN_FULL_C - VR_FAN_START_C) * 100.0f;
+                        if (vr_floor > fan_out) {
+                            fan_out = vr_floor;
+                        }
+                    }
+
+                    update_fan_speed(GLOBAL_STATE, fan_out, "Auto");
 
                     log_counter += POLL_TIME_MS;
                     if (log_counter >= LOG_TIME_MS) {
                         log_counter -= LOG_TIME_MS;
-                        ESP_LOGI(TAG, "Temp: %.1f°C, SetPoint: %.1f°C, Output: %.1f%%", pid_input, pid_setPoint, pid_output);
+                        ESP_LOGI(TAG, "Temp: %.1f°C, SetPoint: %.1f°C, Output: %.1f%%, VR %.1f°C (fan floor %.0f%%)",
+                                 pid_input, pid_setPoint, fan_out, vr, vr_floor);
                     }
                 } else {
                     update_fan_speed(GLOBAL_STATE, 70.0f, "Startup");
