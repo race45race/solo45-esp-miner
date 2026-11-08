@@ -397,6 +397,10 @@ void stratum_v1_task(void *pvParameters)
                         } else {
                             GLOBAL_STATE->SYSTEM_MODULE.work_received++;
                             SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
+                            {
+                                const char *ph = stratum_api_v1_message.mining_notification->prev_block_hash;
+                                if (ph) SYSTEM_note_prev_hash(GLOBAL_STATE, ph, strlen(ph));
+                            }
                             if (stratum_api_v1_message.mining_notification->clean_jobs &&
                                 (GLOBAL_STATE->stratum_queue.count > 0)) {
                                 SYSTEM_clean_jobs_queue(GLOBAL_STATE);

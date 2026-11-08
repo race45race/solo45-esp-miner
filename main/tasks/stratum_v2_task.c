@@ -239,6 +239,7 @@ static void stratum_v2_enqueue_job(GlobalState *GLOBAL_STATE, sv2_conn_t *conn,
 
     SYSTEM_notify_new_ntime(GLOBAL_STATE, ntime);
 
+    SYSTEM_note_prev_hash(GLOBAL_STATE, prev_hash, 32);
     if (clean_jobs && (GLOBAL_STATE->stratum_queue.count > 0)) {
         SYSTEM_clean_jobs_queue(GLOBAL_STATE);
     }
@@ -269,6 +270,7 @@ static void stratum_v2_enqueue_ext_job(GlobalState *GLOBAL_STATE, sv2_conn_t *co
 
     SYSTEM_notify_new_ntime(GLOBAL_STATE, job->ntime);
 
+    SYSTEM_note_prev_hash(GLOBAL_STATE, job->prev_hash, 32);
     if (job->clean_jobs && (GLOBAL_STATE->stratum_queue.count > 0)) {
         SYSTEM_clean_jobs_queue(GLOBAL_STATE);
     }

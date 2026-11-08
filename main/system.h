@@ -1,6 +1,7 @@
 #ifndef SYSTEM_H_
 #define SYSTEM_H_
 
+#include <stddef.h>
 #include "esp_err.h"
 
 #include "sv2_protocol.h"
@@ -28,6 +29,7 @@ esp_err_t SYSTEM_init_peripherals(GlobalState * GLOBAL_STATE);
 // and reset hashrate measurements so reconnects don't spike the average.
 // Shared by the SV1 and SV2 tasks.
 void SYSTEM_clean_jobs_queue(GlobalState * GLOBAL_STATE);
+void SYSTEM_note_prev_hash(GlobalState * GLOBAL_STATE, const void * prev_hash, size_t len);
 
 void SYSTEM_notify_accepted_share(GlobalState * GLOBAL_STATE);
 void SYSTEM_notify_rejected_share(GlobalState * GLOBAL_STATE, char * error_msg);

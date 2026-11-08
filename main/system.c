@@ -437,6 +437,40 @@ void SYSTEM_clean_jobs_queue(GlobalState * GLOBAL_STATE)
     hashrate_monitor_reset_measurements(GLOBAL_STATE);
 }
 
+// Solo45: when the previous-block hash changes (a new block), every job already
+// sent to the chip is for the old block. Mark them all invalid, so a nonce from
+// one that arrives late is dropped instead of being sent as a stale share.
+// Only a real change of block counts: pools also send clean_jobs for the same
+// block (Solo45's full template after its empty-block-first job, a payout
+// change), and that work is still valid. Called for every job before it is
+// queued, so the new block's job is sent (and marked valid) after this. Unlike
+// SYSTEM_clean_jobs_queue it leaves the queue and the hashrate measurements alone.
+void SYSTEM_note_prev_hash(GlobalState * GLOBAL_STATE, const void * prev_hash, size_t len)
+{
+    static uint8_t last[64];
+    static size_t last_len = 0;
+
+    if (prev_hash == NULL || len == 0 || len > sizeof(last)) {
+        return;
+    }
+    if (len == last_len && memcmp(last, prev_hash, len) == 0) {
+        return; // same block
+    }
+    bool first = last_len == 0;
+    memcpy(last, prev_hash, len);
+    last_len = len;
+    if (first) {
+        return; // nothing sent for an earlier block yet
+    }
+
+    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+    for (int i = 0; i < MAX_ASIC_JOBS; i++) {
+        GLOBAL_STATE->valid_jobs[i] = 0;
+    }
+    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+    ESP_LOGI(TAG, "New block: jobs for the previous block invalidated");
+}
+
 void SYSTEM_notify_accepted_share(GlobalState * GLOBAL_STATE)
 {
     SystemModule * module = &GLOBAL_STATE->SYSTEM_MODULE;
