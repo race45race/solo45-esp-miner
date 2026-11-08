@@ -8,6 +8,7 @@
 #include "nvs_config.h"
 #include "thermal.h"
 #include "PID.h"
+#include "esp_timer.h"
 
 #define EPSILON 0.0001f
 #define POLL_TIME_MS 100
@@ -24,8 +25,31 @@
 #define VR_FAN_START_C 75.0f
 #define VR_FAN_FULL_C 95.0f
 
+// Solo45: one failed fan command (a glitch on the fan chip's I2C bus) used to
+// flag a hardware fault at once, and mining stayed stopped until a restart.
+// Now each command is retried; only when the fan cannot be set for FAN_FAULT_MS
+// in a row is the fault flagged (mining stops: a fan that cannot be controlled
+// must not run the chip). The fault clears by itself, and mining resumes, as
+// soon as a fan command works again.
+#define FAN_WRITE_RETRIES 3
+#define FAN_FAULT_MS 5000
+
 static const char * TAG = "fan_controller";
 static const char * prev_context = "";
+static bool fan_write_failing = false;   // last write failed: retry even if the target is unchanged
+static int64_t fan_fail_since_ms = 0;
+static bool fan_fault_flagged = false;   // the hardware fault is ours to clear
+
+static esp_err_t set_fan_with_retry(GlobalState * GLOBAL_STATE, float target_perc)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < FAN_WRITE_RETRIES; i++) {
+        err = Thermal_set_fan_percent(&GLOBAL_STATE->DEVICE_CONFIG, target_perc / 100.0f);
+        if (err == ESP_OK) break;
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    return err;
+}
 
 static void update_fan_speed(GlobalState * GLOBAL_STATE, float target_perc, const char * context)
 {
@@ -41,13 +65,36 @@ static void update_fan_speed(GlobalState * GLOBAL_STATE, float target_perc, cons
             ESP_LOGI(TAG, "%s mode, fan speed: %.1f%%", context, target_perc);
         }
     }
-    if (target_changed) {
+    if (!target_changed && !fan_write_failing) {
+        return;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (set_fan_with_retry(GLOBAL_STATE, target_perc) == ESP_OK) {
         GLOBAL_STATE->POWER_MANAGEMENT_MODULE.fan_perc = target_perc;
-        if (Thermal_set_fan_percent(&GLOBAL_STATE->DEVICE_CONFIG, target_perc / 100.0f) != ESP_OK) {
-            ESP_LOGE(TAG, "FATAL: Fan Control Failed (%s). Flagging hardware fault.", context);
-            GLOBAL_STATE->SYSTEM_MODULE.hardware_fault = true;
-            snprintf(GLOBAL_STATE->SYSTEM_MODULE.hardware_fault_msg, sizeof(GLOBAL_STATE->SYSTEM_MODULE.hardware_fault_msg), "Fan Control Failed (%s)", context);
+        if (fan_write_failing) {
+            ESP_LOGW(TAG, "Fan control works again (%s)", context);
         }
+        fan_write_failing = false;
+        if (fan_fault_flagged) {
+            fan_fault_flagged = false;
+            GLOBAL_STATE->SYSTEM_MODULE.hardware_fault = false;
+            GLOBAL_STATE->SYSTEM_MODULE.hardware_fault_msg[0] = '\0';
+            ESP_LOGW(TAG, "Fan fault cleared, mining resumes");
+        }
+        return;
+    }
+
+    if (!fan_write_failing) {
+        fan_write_failing = true;
+        fan_fail_since_ms = now_ms;
+        ESP_LOGW(TAG, "Fan control failed (%s), retrying", context);
+    }
+    if (!fan_fault_flagged && now_ms - fan_fail_since_ms >= FAN_FAULT_MS) {
+        ESP_LOGE(TAG, "Fan Control Failed for %d ms (%s). Flagging hardware fault.", FAN_FAULT_MS, context);
+        fan_fault_flagged = true;
+        GLOBAL_STATE->SYSTEM_MODULE.hardware_fault = true;
+        snprintf(GLOBAL_STATE->SYSTEM_MODULE.hardware_fault_msg, sizeof(GLOBAL_STATE->SYSTEM_MODULE.hardware_fault_msg), "Fan Control Failed (%s)", context);
     }
 }
 
