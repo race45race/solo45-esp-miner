@@ -46,6 +46,7 @@ static const char * TAG = "autotune";
 #define SETTLE_S 20
 #define MEASURE_S 100
 #define VALIDATE_S 600
+#define MAX_CHECKS 4              // at most 4 ten-minute checks (40 min) before giving up
 #define MIN_HASH_RATIO 0.88f      // average hashrate vs expected for a clean trial
 #define STALL_RATIO 0.20f         // below this for STALL_S seconds = chip stalled
 #define STALL_S 15
@@ -74,7 +75,7 @@ static struct {
     uint16_t mode;
     float freq;             // setting under test
     uint16_t mv;
-    char message[96];
+    char message[192];
     tune_point_t points[MAX_POINTS];
     int n_points;
     int best;               // index into points, -1 = none
@@ -415,46 +416,86 @@ static void run(uint16_t mode)
         if (!found) break;
     }
 
-    // 4. Pick the best point.
-    int best = -1;
-    xSemaphoreTake(S.lock, portMAX_DELAY);
-    for (int i = 0; i < S.n_points; i++) {
-        tune_point_t * q = &S.points[i];
-        if (best < 0) { best = i; continue; }
-        tune_point_t * b = &S.points[best];
-        if (mode == 1 ? (q->ghs > b->ghs * 1.005f || (q->ghs >= b->ghs * 0.995f && q->watts < b->watts))
-                      : (q->jth < b->jth)) {
-            best = i;
+    // 4 + 5. Pick the best point, add a step of voltage margin and check it for
+    // 10 min. Power rises with the square of the voltage, so a point that would
+    // go over the power cap once the margin is added is skipped up front. If the
+    // check hits the power or heat limit, fall back to the next best point (more
+    // voltage would only make that worse); if it shows errors, add one more step.
+    bool skip[MAX_POINTS] = {false};
+    char last_fail[96] = "no clean point found";
+    int checks = 0;
+    while (checks < MAX_CHECKS) {
+        int best = -1;
+        xSemaphoreTake(S.lock, portMAX_DELAY);
+        for (int i = 0; i < S.n_points; i++) {
+            tune_point_t * q = &S.points[i];
+            if (skip[i]) continue;
+            uint16_t m = above_floor(q->mv + STEP_MV);
+            float scale = ((float) m / q->mv) * ((float) m / q->mv);
+            if (m > max_mv || q->watts * scale > max_w) continue;
+            if (best < 0) { best = i; continue; }
+            tune_point_t * b = &S.points[best];
+            if (mode == 1 ? (q->ghs > b->ghs * 1.005f || (q->ghs >= b->ghs * 0.995f && q->watts < b->watts))
+                          : (q->jth < b->jth)) {
+                best = i;
+            }
         }
-    }
-    S.best = best;
-    tune_point_t chosen = best >= 0 ? S.points[best] : (tune_point_t){0};
-    xSemaphoreGive(S.lock);
-    if (best < 0) { apply(orig_freq, orig_mv); finish("failed", "no clean point found"); return; }
+        S.best = best;
+        tune_point_t chosen = best >= 0 ? S.points[best] : (tune_point_t){0};
+        xSemaphoreGive(S.lock);
+        if (best < 0) break;
 
-    // 5. Margin and a long check; one more step of margin if it is not clean.
-    uint16_t final_mv = above_floor(chosen.mv + STEP_MV);
-    for (int attempt = 0; attempt < 2; attempt++) {
-        if (final_mv > max_mv) final_mv = max_mv;
-        set_message("validating", "Stopped at the %s. Checking %u MHz at %u mV for 10 min", ceiling, chosen.mhz, final_mv);
-        r = trial(chosen.mhz, final_mv, VALIDATE_S, max_w, max_err, &p, &why);
-        if (r == TRIAL_OK) {
-            nvs_config_set_float(NVS_CONFIG_ASIC_FREQUENCY, (float) chosen.mhz);
-            nvs_config_set_u16(NVS_CONFIG_ASIC_VOLTAGE, final_mv);
-            S.saved_mhz = chosen.mhz;
-            S.saved_mv = final_mv;
-            finish("done", "");
-            set_message(NULL, "Saved %u MHz / %u mV: %.0f GH/s, %.1f W, %.1f J/TH (was %.0f MHz / %u mV)",
-                        chosen.mhz, final_mv, p.ghs, p.watts, p.jth, orig_freq, orig_mv);
-            return;
+        uint16_t final_mv = above_floor(chosen.mv + STEP_MV);
+        bool next_point = false;
+        for (int extra = 0; extra < 2 && checks < MAX_CHECKS && !next_point; extra++) {
+            if (final_mv > max_mv) { snprintf(last_fail, sizeof(last_fail), "%u MHz needs more than %u mV", chosen.mhz, max_mv); break; }
+            checks++;
+            set_message("validating", "Stopped at the %s. Checking %u MHz at %u mV for 10 min (check %d)", ceiling, chosen.mhz, final_mv, checks);
+            r = trial(chosen.mhz, final_mv, VALIDATE_S, max_w, max_err, &p, &why);
+            if (r == TRIAL_OK) {
+                nvs_config_set_float(NVS_CONFIG_ASIC_FREQUENCY, (float) chosen.mhz);
+                nvs_config_set_u16(NVS_CONFIG_ASIC_VOLTAGE, final_mv);
+                S.saved_mhz = chosen.mhz;
+                S.saved_mv = final_mv;
+                finish("done", "");
+                set_message(NULL, "Saved %u MHz / %u mV: %.0f GH/s, %.1f W, %.1f J/TH (was %.0f MHz / %u mV)",
+                            chosen.mhz, final_mv, p.ghs, p.watts, p.jth, orig_freq, orig_mv);
+                return;
+            }
+            if (r == TRIAL_ABORT) { apply(orig_freq, orig_mv); finish("stopped", why); return; }
+            switch (r) {
+            case TRIAL_POWER:
+                snprintf(last_fail, sizeof(last_fail), "%u MHz / %u mV: power %.1f W over %.0f W", chosen.mhz, final_mv, p.watts, max_w);
+                next_point = true;
+                break;
+            case TRIAL_HOT:
+                snprintf(last_fail, sizeof(last_fail), "%u MHz / %u mV: heat limit (chip %.1f C, VR %.0f C, fan %.0f%%)", chosen.mhz, final_mv, p.chip, p.vr, p.fan);
+                next_point = true;
+                break;
+            case TRIAL_UNSTABLE:
+                snprintf(last_fail, sizeof(last_fail), "%u MHz / %u mV: %.2f%% errors, %.0f GH/s", chosen.mhz, final_mv, p.err, p.ghs);
+                break;
+            case TRIAL_STALL:
+                snprintf(last_fail, sizeof(last_fail), "%u MHz / %u mV: chip stalled", chosen.mhz, final_mv);
+                recover(orig_freq, orig_mv);
+                break;
+            case TRIAL_DOMAIN:
+                snprintf(last_fail, sizeof(last_fail), "%u MHz / %u mV: a hash domain stopped", chosen.mhz, final_mv);
+                note_domain_stop(chosen.mhz, final_mv);
+                reset_or_restart(orig_freq, orig_mv);
+                break;
+            default:
+                break;
+            }
+            ESP_LOGW(TAG, "Check failed: %s", last_fail);
+            final_mv = above_floor(final_mv + STEP_MV);
         }
-        if (r == TRIAL_ABORT) break;
-        if (r == TRIAL_STALL) recover(orig_freq, orig_mv);
-        if (r == TRIAL_DOMAIN) { note_domain_stop(chosen.mhz, final_mv); reset_or_restart(orig_freq, orig_mv); }
-        final_mv = above_floor(final_mv + STEP_MV);
+        skip[best] = true;
     }
     apply(orig_freq, orig_mv);
-    finish(r == TRIAL_ABORT ? "stopped" : "failed", r == TRIAL_ABORT ? why : "the chosen point failed its check; saved settings kept");
+    char msg[192];
+    snprintf(msg, sizeof(msg), "no point passed its check (last: %s); saved settings kept", last_fail);
+    finish("failed", msg);
 }
 
 void AUTOTUNE_task(void * pvParameters)
