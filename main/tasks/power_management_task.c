@@ -48,6 +48,7 @@
 #define THROTTLE_VR_COOL 85.0f
 #define THROTTLE_DOWN_POLLS (45000 / POLL_RATE)  // ~45 s hot before each step down
 #define THROTTLE_UP_POLLS (300000 / POLL_RATE)   // 5 min cool before each step up
+#define THROTTLE_COOL_DECAY 3                    // a not-quite-cool reading takes 3 off the cool count
 
 static const char * TAG = "power_management";
 
@@ -334,7 +335,9 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                 if (throttle_hot_polls > 0) {
                     throttle_hot_polls--;
                 }
-                if (cool && throttle_steps > 0) {
+                if (throttle_steps == 0) {
+                    throttle_cool_polls = 0;
+                } else if (cool) {
                     if (++throttle_cool_polls >= THROTTLE_UP_POLLS) {
                         throttle_cool_polls = 0;
                         throttle_steps--;
@@ -342,7 +345,15 @@ void POWER_MANAGEMENT_task(void * pvParameters)
                                  asic_frequency - throttle_steps * THROTTLE_STEP_MHZ, asic_frequency, chip_max, power_management->fan_perc);
                     }
                 } else {
-                    throttle_cool_polls = 0;
+                    // Solo45: a reading just over the cool line (the fan PID wobbles
+                    // a few % every second) only takes some time off the clock. The
+                    // old rule restarted the 5 minutes on any one of 3000 readings,
+                    // so a fan resting at 72-74% never let the throttle step up.
+                    // Now ~5-8 min of mostly cool readings is enough; a real hot
+                    // reading still clears the clock (above).
+                    throttle_cool_polls = throttle_cool_polls > THROTTLE_COOL_DECAY
+                                              ? throttle_cool_polls - THROTTLE_COOL_DECAY
+                                              : 0;
                 }
             }
         }
