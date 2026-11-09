@@ -16,6 +16,12 @@
 //    last good point comes back. Overheat safe mode, a pause, a lost pool or a
 //    hardware fault stops the tune and restores the original settings.
 //  - Needs the auto fan: "the fan is flat out" is how heat limits are found.
+//  - Watches every hash domain of every chip. Too little voltage often stops one
+//    domain (a quarter of a BM1370) while the total still looks plausible, and a
+//    stopped domain stays stopped until the chip is re-initialised. So a domain
+//    near zero ends the trial, the chip is re-initialised before the next one,
+//    and the voltage where it happened (+20 mV) becomes a floor for the rest of
+//    the tune, at that frequency and above.
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -28,6 +34,8 @@
 #include "global_state.h"
 #include "nvs_config.h"
 #include "autotune_task.h"
+#include "asic.h"
+#include "esp_system.h"
 
 static const char * TAG = "autotune";
 
@@ -47,9 +55,13 @@ static const char * TAG = "autotune";
 #define FAN_FULL 95.0f
 #define HOT_MARGIN_C 1.0f
 #define MAX_POINTS 40
+#define DOMAIN_DEAD_RATIO 0.25f   // a domain under this share of its expected hashrate...
+#define DOMAIN_DEAD_S 20          // ...for this many seconds in a row has stopped
+#define DOMAIN_ALIVE_RATIO 0.50f  // after a re-init, every domain must be back above this
+#define DOMAIN_FLOOR_MARGIN_MV 20 // the floor sits this far above where a domain stopped
 
-typedef enum { TRIAL_OK, TRIAL_UNSTABLE, TRIAL_STALL, TRIAL_HOT, TRIAL_POWER, TRIAL_ABORT } trial_result_t;
-static const char * trial_names[] = {"ok", "errors", "stalled", "heat limit", "power limit", "stopped"};
+typedef enum { TRIAL_OK, TRIAL_UNSTABLE, TRIAL_STALL, TRIAL_HOT, TRIAL_POWER, TRIAL_ABORT, TRIAL_DOMAIN } trial_result_t;
+static const char * trial_names[] = {"ok", "errors", "stalled", "heat limit", "power limit", "stopped", "domain stopped"};
 
 typedef struct {
     uint16_t mhz, mv;
@@ -68,6 +80,8 @@ static struct {
     int best;               // index into points, -1 = none
     uint16_t saved_mhz, saved_mv;
     uint32_t trials;
+    uint16_t domain_floor_mv;   // 0 = no domain has stopped yet in this tune
+    uint16_t domain_stops;      // how many times a domain stopped
 } S = {.state = "idle", .best = -1};
 
 static GlobalState * G;
@@ -125,6 +139,61 @@ static float chip_max(void)
     return pm->chip_temp_avg > pm->chip_temp2_avg ? pm->chip_temp_avg : pm->chip_temp2_avg;
 }
 
+// The weakest hash domain, as a share of what one domain should do at this
+// frequency. Returns -1 when the chip has no domain counters or no reading yet.
+static float weakest_domain(float mhz)
+{
+    int chips = G->DEVICE_CONFIG.family.asic_count;
+    int domains = G->DEVICE_CONFIG.family.asic.hash_domains;
+    if (chips <= 0 || domains <= 0) return -1.0f;
+    float per_domain = expected_ghs(mhz) / (float) (chips * domains);
+    if (per_domain <= 0) return -1.0f;
+    float weakest = -1.0f;
+    for (int c = 0; c < chips; c++) {
+        for (int d = 0; d < domains; d++) {
+            asic_domain_measurement_t m = {0};
+            if (ASIC_get_domain_measurement(G, c, d, &m) != ESP_OK || m.time_us == 0) continue;
+            float r = m.hashrate / per_domain;
+            if (weakest < 0 || r < weakest) weakest = r;
+        }
+    }
+    return weakest;
+}
+
+// A stopped domain only comes back when the chip is re-initialised (a short
+// pause, as on a restart). Then back to a known-good point, and wait until every
+// domain hashes again.
+static bool reset_chip(float mhz, uint16_t mv)
+{
+    ESP_LOGW(TAG, "Re-initialising the chip to bring the stopped domain back");
+    release();
+    G->SYSTEM_MODULE.mining_paused = true;
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    G->SYSTEM_MODULE.mining_paused = false;
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    apply(mhz, mv);
+    int alive = 0;
+    for (int s = 0; s < 90; s++) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        float w = weakest_domain(mhz);
+        alive = (w < 0 || w >= DOMAIN_ALIVE_RATIO) ? alive + 1 : 0;
+        if (alive >= 10) return true;
+    }
+    ESP_LOGW(TAG, "A domain is still not back after the re-init");
+    return false;
+}
+
+// Remember where a domain stopped: nothing below this voltage again in this tune.
+static void note_domain_stop(float mhz, uint16_t mv)
+{
+    uint16_t floor_mv = mv + DOMAIN_FLOOR_MARGIN_MV;
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    S.domain_stops++;
+    if (floor_mv > S.domain_floor_mv) S.domain_floor_mv = floor_mv;
+    xSemaphoreGive(S.lock);
+    ESP_LOGW(TAG, "A hash domain stopped at %.0f MHz / %u mV: floor now %u mV", mhz, mv, S.domain_floor_mv);
+}
+
 static trial_result_t trial(float mhz, uint16_t mv, int measure_s, float max_w, float max_err, tune_point_t * out, const char ** stop_why)
 {
     PowerManagementModule * pm = &G->POWER_MANAGEMENT_MODULE;
@@ -133,7 +202,7 @@ static trial_result_t trial(float mhz, uint16_t mv, int measure_s, float max_w, 
     float exp_ghs = expected_ghs(mhz);
     float target = (float) nvs_config_get_u16(NVS_CONFIG_TEMP_TARGET);
     double sum_h = 0, sum_e = 0, sum_w = 0, sum_c = 0, sum_v = 0, sum_f = 0;
-    int n = 0, stall = 0;
+    int n = 0, stall = 0, dead = 0;
 
     for (int s = 0; s < SETTLE_S + measure_s; s++) {
         vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -147,6 +216,12 @@ static trial_result_t trial(float mhz, uint16_t mv, int measure_s, float max_w, 
         if (s >= 5) { // the frequency ramp is done by then
             stall = h < exp_ghs * STALL_RATIO ? stall + 1 : 0;
             if (stall >= STALL_S) return TRIAL_STALL;
+            float w = weakest_domain(mhz);
+            dead = (w >= 0 && w < DOMAIN_DEAD_RATIO) ? dead + 1 : 0;
+            if (dead >= DOMAIN_DEAD_S) {
+                ESP_LOGW(TAG, "%.0f MHz %u mV: a hash domain is at %.0f%% of its share, ending trial", mhz, mv, w * 100);
+                return TRIAL_DOMAIN;
+            }
         }
         if (s < SETTLE_S) continue;
         sum_h += h;
@@ -217,6 +292,22 @@ static void finish(const char * state, const char * why)
     set_message(state, "%s", why);
 }
 
+// Re-initialise the chip after a stopped domain; if even that does not bring it
+// back, restart the miner (it comes back on its saved settings, tune ended).
+static void reset_or_restart(float mhz, uint16_t mv)
+{
+    if (reset_chip(mhz, mv)) return;
+    finish("failed", "a hash domain did not come back; restarting the miner on its saved settings");
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    esp_restart();
+}
+
+// Never test below the domain floor.
+static uint16_t above_floor(uint16_t mv)
+{
+    return mv < S.domain_floor_mv ? S.domain_floor_mv : mv;
+}
+
 static void run(uint16_t mode)
 {
     const AsicConfig * asic = &G->DEVICE_CONFIG.family.asic;
@@ -243,6 +334,8 @@ static void run(uint16_t mode)
     S.best = -1;
     S.trials = 0;
     S.saved_mhz = S.saved_mv = 0;
+    S.domain_floor_mv = 0;
+    S.domain_stops = 0;
     xSemaphoreGive(S.lock);
 
     if (G->SELF_TEST_MODULE.is_active || !G->ASIC_initalized) { finish("failed", "miner not ready"); return; }
@@ -251,6 +344,21 @@ static void run(uint16_t mode)
 
     set_message("running", "%s tune from %.0f MHz / %u mV, limits %u mV, %.0f W, %.1f%% errors",
                 mode == 1 ? "Power" : "Efficiency", orig_freq, orig_mv, max_mv, max_w, max_err);
+
+    // A domain that stopped before the tune (it stays stopped until a re-init)
+    // would make every trial look bad: bring it back first.
+    {
+        int low = 0;
+        for (int s = 0; s < 15; s++) {
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            float w = weakest_domain(orig_freq);
+            low = (w >= 0 && w < DOMAIN_DEAD_RATIO) ? low + 1 : 0;
+        }
+        if (low >= 10) {
+            set_message(NULL, "A hash domain was already stopped; re-initialising the chip first");
+            reset_or_restart(orig_freq, orig_mv);
+        }
+    }
 
     float f = floorf((orig_freq - (mode == 2 ? 200.0f : 100.0f)) / STEP_MHZ) * STEP_MHZ;
     if (f < FREQ_HARD_MIN) f = FREQ_HARD_MIN;
@@ -264,37 +372,43 @@ static void run(uint16_t mode)
         if (r == TRIAL_OK) break;
         if (r == TRIAL_ABORT) { apply(orig_freq, orig_mv); finish("stopped", why); return; }
         if (r == TRIAL_STALL) recover(orig_freq, orig_mv);
+        if (r == TRIAL_DOMAIN) { note_domain_stop(f, mv); reset_or_restart(orig_freq, orig_mv); }
         if (r == TRIAL_HOT || r == TRIAL_POWER) { apply(orig_freq, orig_mv); finish("failed", "already at a heat or power limit at the start"); return; }
-        mv += STEP_MV;
+        mv = above_floor(mv + STEP_MV);
         if (mv > max_mv) { apply(orig_freq, orig_mv); finish("failed", "no clean starting point"); return; }
     }
     record(&p);
 
     // 2. Its voltage floor.
-    while (mv - STEP_MV >= min_mv) {
+    while (mv - STEP_MV >= min_mv && mv - STEP_MV >= S.domain_floor_mv) {
         tune_point_t q;
         r = trial(f, mv - STEP_MV, MEASURE_S, max_w, max_err, &q, &why);
         if (r == TRIAL_ABORT) { apply(orig_freq, orig_mv); finish("stopped", why); return; }
         if (r != TRIAL_OK) {
             if (r == TRIAL_STALL && !recover(f, mv)) { finish("failed", "chip stalled and was reset; saved settings kept"); return; }
+            if (r == TRIAL_DOMAIN) { note_domain_stop(f, mv - STEP_MV); reset_or_restart(f, above_floor(mv)); }
             break;
         }
         mv -= STEP_MV;
         record(&q);
     }
     set_message(NULL, "Floor at %.0f MHz: %u mV", f, mv);
+    mv = above_floor(mv);
 
     // 3. Up in frequency, raising the voltage only as needed.
     const char * ceiling = "frequency limit";
     for (f += STEP_MHZ; f <= FREQ_HARD_MAX; f += STEP_MHZ) {
         bool found = false;
         while (true) {
+            mv = above_floor(mv);
+            if (mv > max_mv) { ceiling = "voltage limit"; break; }
             set_message(NULL, "Testing %.0f MHz at %u mV", f, mv);
             r = trial(f, mv, MEASURE_S, max_w, max_err, &p, &why);
             if (r == TRIAL_OK) { record(&p); found = true; break; }
             if (r == TRIAL_ABORT) { apply(orig_freq, orig_mv); finish("stopped", why); return; }
             if (r == TRIAL_HOT || r == TRIAL_POWER) { ceiling = trial_names[r]; break; }
             if (r == TRIAL_STALL && !recover(f - STEP_MHZ, mv)) { finish("failed", "chip stalled and was reset; saved settings kept"); return; }
+            if (r == TRIAL_DOMAIN) { note_domain_stop(f, mv); reset_or_restart(orig_freq, orig_mv); }
             if (mv + STEP_MV > max_mv) { ceiling = "voltage limit"; break; }
             mv += STEP_MV;
         }
@@ -319,7 +433,7 @@ static void run(uint16_t mode)
     if (best < 0) { apply(orig_freq, orig_mv); finish("failed", "no clean point found"); return; }
 
     // 5. Margin and a long check; one more step of margin if it is not clean.
-    uint16_t final_mv = chosen.mv + STEP_MV;
+    uint16_t final_mv = above_floor(chosen.mv + STEP_MV);
     for (int attempt = 0; attempt < 2; attempt++) {
         if (final_mv > max_mv) final_mv = max_mv;
         set_message("validating", "Stopped at the %s. Checking %u MHz at %u mV for 10 min", ceiling, chosen.mhz, final_mv);
@@ -336,7 +450,8 @@ static void run(uint16_t mode)
         }
         if (r == TRIAL_ABORT) break;
         if (r == TRIAL_STALL) recover(orig_freq, orig_mv);
-        final_mv += STEP_MV;
+        if (r == TRIAL_DOMAIN) { note_domain_stop(chosen.mhz, final_mv); reset_or_restart(orig_freq, orig_mv); }
+        final_mv = above_floor(final_mv + STEP_MV);
     }
     apply(orig_freq, orig_mv);
     finish(r == TRIAL_ABORT ? "stopped" : "failed", r == TRIAL_ABORT ? why : "the chosen point failed its check; saved settings kept");
@@ -380,6 +495,8 @@ void AUTOTUNE_add_json(cJSON * root)
     cJSON_AddNumberToObject(t, "savedMhz", S.saved_mhz);
     cJSON_AddNumberToObject(t, "savedMv", S.saved_mv);
     cJSON_AddNumberToObject(t, "best", S.best);
+    cJSON_AddNumberToObject(t, "domainFloorMv", S.domain_floor_mv);
+    cJSON_AddNumberToObject(t, "domainStops", S.domain_stops);
     cJSON * pts = cJSON_AddArrayToObject(t, "points");
     for (int i = 0; i < S.n_points; i++) {
         tune_point_t * p = &S.points[i];
