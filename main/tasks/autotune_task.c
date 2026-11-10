@@ -498,10 +498,91 @@ static void run(uint16_t mode)
     finish("failed", msg);
 }
 
+// ---- Stalled-domain watchdog (runs only while no tune is active) ----
+// A hash domain that stops stays stopped until the chip is re-initialised. When
+// one sits under DOMAIN_DEAD_RATIO for WATCH_DEAD_S, pause mining briefly (the
+// same re-init as a restart, without one). If that doesn't bring it back, restart
+// the miner, but never twice within WATCH_RESTART_MIN_S of uptime, and at most
+// WATCH_MAX_REINITS re-inits per WATCH_WINDOW_S, so it can't loop.
+#define WATCH_DEAD_S 120
+#define WATCH_STARTUP_S 180
+#define WATCH_MAX_REINITS 3
+#define WATCH_WINDOW_S (6 * 3600)
+#define WATCH_RESTART_MIN_S 1800
+
+static struct {
+    uint32_t reinits;          // since boot
+    uint32_t fixed;            // re-inits that brought the domain back
+    int64_t window_start_s;
+    uint32_t window_count;
+    char last[128];
+} W = {.last = ""};
+
+static void watch_note(const char * fmt, ...)
+{
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(W.last, sizeof(W.last), fmt, ap);
+    va_end(ap);
+    xSemaphoreGive(S.lock);
+    ESP_LOGW(TAG, "domain watch: %s", W.last);
+}
+
+static bool watch_busy(void)
+{
+    SystemModule * sys = &G->SYSTEM_MODULE;
+    return !G->ASIC_initalized || sys->mining_paused || sys->overheat_mode || sys->pools_unavailable ||
+           sys->hardware_fault || sys->is_firmware_update || G->POWER_MANAGEMENT_MODULE.tune_active;
+}
+
+static void domain_watch(int * dead_s)
+{
+    int64_t up = G->SYSTEM_MODULE.uptime_seconds;
+    if (up < WATCH_STARTUP_S || watch_busy()) { *dead_s = 0; return; }
+    float mhz = G->POWER_MANAGEMENT_MODULE.actual_frequency;
+    if (mhz <= 0) { *dead_s = 0; return; }
+    float w = weakest_domain(mhz);
+    *dead_s = (w >= 0 && w < DOMAIN_DEAD_RATIO) ? *dead_s + 2 : 0;
+    if (*dead_s < WATCH_DEAD_S) return;
+    *dead_s = 0;
+
+    if (up - W.window_start_s > WATCH_WINDOW_S) { W.window_start_s = up; W.window_count = 0; }
+    if (W.window_count >= WATCH_MAX_REINITS) {
+        watch_note("a domain is stopped, but %u re-inits in the last 6 h already; leaving it for a person to check", (unsigned) W.window_count);
+        return;
+    }
+    W.window_count++;
+    W.reinits++;
+    watch_note("a domain was at %.0f%% for %d s at %.0f MHz; re-initialising the chip", w * 100, WATCH_DEAD_S, mhz);
+    G->SYSTEM_MODULE.mining_paused = true;
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    G->SYSTEM_MODULE.mining_paused = false;
+    vTaskDelay(20000 / portTICK_PERIOD_MS);
+    int alive = 0;
+    for (int s = 0; s < 90 && alive < 10; s++) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        float x = weakest_domain(G->POWER_MANAGEMENT_MODULE.actual_frequency);
+        alive = (x < 0 || x >= DOMAIN_ALIVE_RATIO) ? alive + 1 : 0;
+    }
+    if (alive >= 10) {
+        W.fixed++;
+        watch_note("re-init brought every domain back (uptime %lld s)", (long long) G->SYSTEM_MODULE.uptime_seconds);
+        return;
+    }
+    if (G->SYSTEM_MODULE.uptime_seconds >= WATCH_RESTART_MIN_S) {
+        watch_note("re-init did not bring the domain back; restarting the miner");
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+        esp_restart();
+    }
+    watch_note("re-init did not bring the domain back, and the miner restarted less than 30 min ago; not restarting again");
+}
+
 void AUTOTUNE_task(void * pvParameters)
 {
     G = (GlobalState *) pvParameters;
     S.lock = xSemaphoreCreateMutex();
+    int watch_dead_s = 0;
 
     // A tune that was running at a reboot is not resumed: the saved settings
     // were never touched, so the miner simply comes back on them.
@@ -516,8 +597,11 @@ void AUTOTUNE_task(void * pvParameters)
         if (mode == 1 || mode == 2) {
             run(mode);
             release();
+            watch_dead_s = 0;
         } else if (mode != 0) {
             nvs_config_set_u16(NVS_CONFIG_SOLO45_TUNE_MODE, 0);
+        } else {
+            domain_watch(&watch_dead_s);
         }
     }
 }
@@ -538,6 +622,9 @@ void AUTOTUNE_add_json(cJSON * root)
     cJSON_AddNumberToObject(t, "best", S.best);
     cJSON_AddNumberToObject(t, "domainFloorMv", S.domain_floor_mv);
     cJSON_AddNumberToObject(t, "domainStops", S.domain_stops);
+    cJSON_AddNumberToObject(t, "watchReinits", W.reinits);
+    cJSON_AddNumberToObject(t, "watchFixed", W.fixed);
+    cJSON_AddStringToObject(t, "watchLast", W.last);
     cJSON * pts = cJSON_AddArrayToObject(t, "points");
     for (int i = 0; i < S.n_points; i++) {
         tune_point_t * p = &S.points[i];
