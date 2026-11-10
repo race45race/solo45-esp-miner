@@ -36,8 +36,14 @@
 #include "autotune_task.h"
 #include "asic.h"
 #include "esp_system.h"
+#include "nvs.h"
 
 static const char * TAG = "autotune";
+
+// The last tune's result and the watchdog's lifetime counts are kept in their
+// own NVS namespace, written only when a tune ends or the watchdog acts, so the
+// page still shows them after a restart.
+#define SAVE_NS "solo45tune"
 
 #define STEP_MHZ 25.0f
 #define STEP_MV 10
@@ -83,7 +89,96 @@ static struct {
     uint32_t trials;
     uint16_t domain_floor_mv;   // 0 = no domain has stopped yet in this tune
     uint16_t domain_stops;      // how many times a domain stopped
+    bool from_save;             // the result shown was loaded from flash at boot
 } S = {.state = "idle", .best = -1};
+
+#define SAVE_VER 1
+typedef struct {
+    uint8_t ver;
+    char state[12];
+    uint16_t mode;
+    char message[192];
+    uint8_t n_points;
+    int8_t best;
+    uint16_t saved_mhz, saved_mv;
+    uint32_t trials;
+    uint16_t domain_floor_mv, domain_stops;
+    tune_point_t points[MAX_POINTS];
+} saved_result_t;
+
+static const char * const STATES[] = {"idle", "running", "validating", "done", "stopped", "failed"};
+
+static bool save_blob(const char * key, const void * data, size_t len)
+{
+    nvs_handle_t h;
+    if (nvs_open(SAVE_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t e = nvs_set_blob(h, key, data, len);
+    if (e == ESP_OK) e = nvs_commit(h);
+    nvs_close(h);
+    if (e != ESP_OK) ESP_LOGW(TAG, "saving %s failed: %s", key, esp_err_to_name(e));
+    return e == ESP_OK;
+}
+
+static bool load_blob(const char * key, void * data, size_t len)
+{
+    nvs_handle_t h;
+    if (nvs_open(SAVE_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    size_t got = len;
+    esp_err_t e = nvs_get_blob(h, key, data, &got);
+    nvs_close(h);
+    return e == ESP_OK && got == len;
+}
+
+// Keep the finished (or failed / stopped) tune so it survives a restart.
+static void save_result(void)
+{
+    static saved_result_t r;  // ~1.8 KB: keep it off the task stack
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    memset(&r, 0, sizeof(r));
+    r.ver = SAVE_VER;
+    strlcpy(r.state, S.state, sizeof(r.state));
+    r.mode = S.mode;
+    strlcpy(r.message, S.message, sizeof(r.message));
+    r.n_points = (uint8_t) S.n_points;
+    r.best = (int8_t) S.best;
+    r.saved_mhz = S.saved_mhz;
+    r.saved_mv = S.saved_mv;
+    r.trials = S.trials;
+    r.domain_floor_mv = S.domain_floor_mv;
+    r.domain_stops = S.domain_stops;
+    memcpy(r.points, S.points, sizeof(r.points));
+    S.from_save = false;
+    xSemaphoreGive(S.lock);
+    save_blob("result", &r, sizeof(r));
+}
+
+static void load_result(void)
+{
+    static saved_result_t r;
+    if (!load_blob("result", &r, sizeof(r)) || r.ver != SAVE_VER) return;
+    r.state[sizeof(r.state) - 1] = 0;
+    r.message[sizeof(r.message) - 1] = 0;
+    const char * state = NULL;
+    for (size_t i = 0; i < sizeof(STATES) / sizeof(STATES[0]); i++) {
+        if (strcmp(r.state, STATES[i]) == 0) state = STATES[i];
+    }
+    // A result saved mid-tune can't happen (it is saved when a tune ends), but never show one as live.
+    if (!state || state == STATES[1] || state == STATES[2]) state = "stopped";
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    S.state = state;
+    S.mode = r.mode;
+    strlcpy(S.message, r.message, sizeof(S.message));
+    S.n_points = r.n_points <= MAX_POINTS ? r.n_points : MAX_POINTS;
+    S.best = r.best < S.n_points ? r.best : -1;
+    S.saved_mhz = r.saved_mhz;
+    S.saved_mv = r.saved_mv;
+    S.trials = r.trials;
+    S.domain_floor_mv = r.domain_floor_mv;
+    S.domain_stops = r.domain_stops;
+    memcpy(S.points, r.points, sizeof(S.points));
+    S.from_save = true;
+    xSemaphoreGive(S.lock);
+}
 
 static GlobalState * G;
 static float orig_freq;
@@ -299,6 +394,7 @@ static void reset_or_restart(float mhz, uint16_t mv)
 {
     if (reset_chip(mhz, mv)) return;
     finish("failed", "a hash domain did not come back; restarting the miner on its saved settings");
+    save_result();
     vTaskDelay(3000 / portTICK_PERIOD_MS);
     esp_restart();
 }
@@ -337,6 +433,7 @@ static void run(uint16_t mode)
     S.saved_mhz = S.saved_mv = 0;
     S.domain_floor_mv = 0;
     S.domain_stops = 0;
+    S.from_save = false;
     xSemaphoreGive(S.lock);
 
     if (G->SELF_TEST_MODULE.is_active || !G->ASIC_initalized) { finish("failed", "miner not ready"); return; }
@@ -516,17 +613,32 @@ static struct {
     int64_t window_start_s;
     uint32_t window_count;
     char last[128];
-} W = {.last = ""};
+    int64_t last_up_s;         // uptime of the last note, -1 = none this boot
+} W = {.last = "", .last_up_s = -1};
+
+// Lifetime counts, kept in flash (written only when the watchdog acts).
+#define WATCH_SAVE_VER 1
+static struct {
+    uint8_t ver;
+    uint32_t reinits, fixed, restarts;
+    char last[128];
+} WT = {.ver = WATCH_SAVE_VER};
 
 static void watch_note(const char * fmt, ...)
 {
-    xSemaphoreTake(S.lock, portMAX_DELAY);
+    char buf[sizeof(W.last)];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(W.last, sizeof(W.last), fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    bool changed = strcmp(buf, WT.last) != 0;
+    strlcpy(W.last, buf, sizeof(W.last));
+    strlcpy(WT.last, buf, sizeof(WT.last));
+    W.last_up_s = G->SYSTEM_MODULE.uptime_seconds;
     xSemaphoreGive(S.lock);
-    ESP_LOGW(TAG, "domain watch: %s", W.last);
+    ESP_LOGW(TAG, "domain watch: %s", buf);
+    if (changed) save_blob("watch", &WT, sizeof(WT));  // a repeated note (same text) doesn't wear the flash
 }
 
 static bool watch_busy(void)
@@ -554,6 +666,7 @@ static void domain_watch(int * dead_s)
     }
     W.window_count++;
     W.reinits++;
+    WT.reinits++;
     watch_note("a domain was at %.0f%% for %d s at %.0f MHz; re-initialising the chip", w * 100, WATCH_DEAD_S, mhz);
     G->SYSTEM_MODULE.mining_paused = true;
     vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -567,11 +680,13 @@ static void domain_watch(int * dead_s)
     }
     if (alive >= 10) {
         W.fixed++;
+        WT.fixed++;
         watch_note("re-init brought every domain back (uptime %lld s)", (long long) G->SYSTEM_MODULE.uptime_seconds);
         return;
     }
     if (G->SYSTEM_MODULE.uptime_seconds >= WATCH_RESTART_MIN_S) {
-        watch_note("re-init did not bring the domain back; restarting the miner");
+        WT.restarts++;
+        watch_note("re-init did not bring the domain back; restarted the miner (uptime was %lld s)", (long long) G->SYSTEM_MODULE.uptime_seconds);
         vTaskDelay(3000 / portTICK_PERIOD_MS);
         esp_restart();
     }
@@ -584,11 +699,21 @@ void AUTOTUNE_task(void * pvParameters)
     S.lock = xSemaphoreCreateMutex();
     int watch_dead_s = 0;
 
+    if (load_blob("watch", &WT, sizeof(WT)) && WT.ver == WATCH_SAVE_VER) {
+        WT.last[sizeof(WT.last) - 1] = 0;
+    } else {
+        memset(&WT, 0, sizeof(WT));
+        WT.ver = WATCH_SAVE_VER;
+    }
+
     // A tune that was running at a reboot is not resumed: the saved settings
     // were never touched, so the miner simply comes back on them.
     if (nvs_config_get_u16(NVS_CONFIG_SOLO45_TUNE_MODE) != 0) {
         nvs_config_set_u16(NVS_CONFIG_SOLO45_TUNE_MODE, 0);
         set_message("stopped", "a tune was interrupted by a restart; saved settings kept");
+        save_result();
+    } else {
+        load_result();
     }
 
     while (1) {
@@ -597,6 +722,7 @@ void AUTOTUNE_task(void * pvParameters)
         if (mode == 1 || mode == 2) {
             run(mode);
             release();
+            save_result();
             watch_dead_s = 0;
         } else if (mode != 0) {
             nvs_config_set_u16(NVS_CONFIG_SOLO45_TUNE_MODE, 0);
@@ -625,6 +751,12 @@ void AUTOTUNE_add_json(cJSON * root)
     cJSON_AddNumberToObject(t, "watchReinits", W.reinits);
     cJSON_AddNumberToObject(t, "watchFixed", W.fixed);
     cJSON_AddStringToObject(t, "watchLast", W.last);
+    cJSON_AddNumberToObject(t, "watchLastAgoS", W.last_up_s >= 0 ? (double) (G->SYSTEM_MODULE.uptime_seconds - W.last_up_s) : -1);
+    cJSON_AddNumberToObject(t, "watchReinitsTotal", WT.reinits);
+    cJSON_AddNumberToObject(t, "watchFixedTotal", WT.fixed);
+    cJSON_AddNumberToObject(t, "watchRestartsTotal", WT.restarts);
+    cJSON_AddStringToObject(t, "watchLastEver", WT.last);
+    cJSON_AddBoolToObject(t, "fromSave", S.from_save);
     cJSON * pts = cJSON_AddArrayToObject(t, "points");
     for (int i = 0; i < S.n_points; i++) {
         tune_point_t * p = &S.points[i];
