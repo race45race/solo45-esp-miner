@@ -129,53 +129,106 @@ static bool load_blob(const char * key, void * data, size_t len)
     return e == ESP_OK && got == len;
 }
 
+// The watchdog's lifetime counts (kept in flash).
+#define WATCH_SAVE_VER 1
+typedef struct {
+    uint8_t ver;
+    uint32_t reinits, fixed, restarts;
+    char last[128];
+} watch_saved_t;
+static watch_saved_t WT = {.ver = WATCH_SAVE_VER};
+
+// Flash is read and written only by this small task. The auto-tune task's stack
+// is in PSRAM, and ESP-IDF doesn't allow flash operations from such a task (the
+// cache is off while flash is busy); stock ESP-Miner uses its nvs_task the same way.
+#define SAVE_RESULT_BIT 1u
+#define SAVE_WATCH_BIT 2u
+static TaskHandle_t saver;
+static SemaphoreHandle_t save_mx, loaded;
+static saved_result_t res_stage;   // ~1.8 KB, off every task stack
+static watch_saved_t watch_stage;
+static bool res_loaded;
+
+static void saver_task(void * arg)
+{
+    res_loaded = load_blob("result", &res_stage, sizeof(res_stage)) && res_stage.ver == SAVE_VER;
+    if (load_blob("watch", &watch_stage, sizeof(watch_stage)) && watch_stage.ver == WATCH_SAVE_VER) {
+        watch_stage.last[sizeof(watch_stage.last) - 1] = 0;
+        WT = watch_stage;
+    }
+    xSemaphoreGive(loaded);
+    while (1) {
+        uint32_t bits = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &bits, portMAX_DELAY);
+        xSemaphoreTake(save_mx, portMAX_DELAY);
+        if (bits & SAVE_RESULT_BIT) save_blob("result", &res_stage, sizeof(res_stage));
+        if (bits & SAVE_WATCH_BIT) save_blob("watch", &watch_stage, sizeof(watch_stage));
+        xSemaphoreGive(save_mx);
+    }
+}
+
+static void save_watch(void)
+{
+    if (!saver) return;
+    xSemaphoreTake(save_mx, portMAX_DELAY);
+    xSemaphoreTake(S.lock, portMAX_DELAY);
+    watch_stage = WT;
+    xSemaphoreGive(S.lock);
+    xSemaphoreGive(save_mx);
+    xTaskNotify(saver, SAVE_WATCH_BIT, eSetBits);
+}
+
 // Keep the finished (or failed / stopped) tune so it survives a restart.
 static void save_result(void)
 {
-    static saved_result_t r;  // ~1.8 KB: keep it off the task stack
+    if (!saver) return;
+    saved_result_t * r = &res_stage;
+    xSemaphoreTake(save_mx, portMAX_DELAY);
     xSemaphoreTake(S.lock, portMAX_DELAY);
-    memset(&r, 0, sizeof(r));
-    r.ver = SAVE_VER;
-    strlcpy(r.state, S.state, sizeof(r.state));
-    r.mode = S.mode;
-    strlcpy(r.message, S.message, sizeof(r.message));
-    r.n_points = (uint8_t) S.n_points;
-    r.best = (int8_t) S.best;
-    r.saved_mhz = S.saved_mhz;
-    r.saved_mv = S.saved_mv;
-    r.trials = S.trials;
-    r.domain_floor_mv = S.domain_floor_mv;
-    r.domain_stops = S.domain_stops;
-    memcpy(r.points, S.points, sizeof(r.points));
+    memset(r, 0, sizeof(*r));
+    r->ver = SAVE_VER;
+    strlcpy(r->state, S.state, sizeof(r->state));
+    r->mode = S.mode;
+    strlcpy(r->message, S.message, sizeof(r->message));
+    r->n_points = (uint8_t) S.n_points;
+    r->best = (int8_t) S.best;
+    r->saved_mhz = S.saved_mhz;
+    r->saved_mv = S.saved_mv;
+    r->trials = S.trials;
+    r->domain_floor_mv = S.domain_floor_mv;
+    r->domain_stops = S.domain_stops;
+    memcpy(r->points, S.points, sizeof(r->points));
     S.from_save = false;
     xSemaphoreGive(S.lock);
-    save_blob("result", &r, sizeof(r));
+    xSemaphoreGive(save_mx);
+    xTaskNotify(saver, SAVE_RESULT_BIT, eSetBits);
 }
 
+// Show the result the saver task read at boot (call once, before anything is saved).
 static void load_result(void)
 {
-    static saved_result_t r;
-    if (!load_blob("result", &r, sizeof(r)) || r.ver != SAVE_VER) return;
-    r.state[sizeof(r.state) - 1] = 0;
-    r.message[sizeof(r.message) - 1] = 0;
+    saved_result_t * r = &res_stage;
+    if (!res_loaded) return;
+    r->state[sizeof(r->state) - 1] = 0;
+    r->message[sizeof(r->message) - 1] = 0;
     const char * state = NULL;
     for (size_t i = 0; i < sizeof(STATES) / sizeof(STATES[0]); i++) {
-        if (strcmp(r.state, STATES[i]) == 0) state = STATES[i];
+        if (strcmp(r->state, STATES[i]) == 0) state = STATES[i];
     }
     // A result saved mid-tune can't happen (it is saved when a tune ends), but never show one as live.
     if (!state || state == STATES[1] || state == STATES[2]) state = "stopped";
     xSemaphoreTake(S.lock, portMAX_DELAY);
     S.state = state;
-    S.mode = r.mode;
-    strlcpy(S.message, r.message, sizeof(S.message));
-    S.n_points = r.n_points <= MAX_POINTS ? r.n_points : MAX_POINTS;
-    S.best = r.best < S.n_points ? r.best : -1;
-    S.saved_mhz = r.saved_mhz;
-    S.saved_mv = r.saved_mv;
-    S.trials = r.trials;
-    S.domain_floor_mv = r.domain_floor_mv;
-    S.domain_stops = r.domain_stops;
-    memcpy(S.points, r.points, sizeof(S.points));
+    S.mode = r->mode;
+    strlcpy(S.message, r->message, sizeof(S.message));
+    S.n_points = r->n_points <= MAX_POINTS ? r->n_points : MAX_POINTS;
+    S.best = r->best < S.n_points ? r->best : -1;
+    S.saved_mhz = r->saved_mhz;
+    S.saved_mv = r->saved_mv;
+    S.trials = r->trials;
+    S.domain_floor_mv = r->domain_floor_mv;
+    S.domain_stops = r->domain_stops;
+    memcpy(S.points, r->points, sizeof(S.points));
     S.from_save = true;
     xSemaphoreGive(S.lock);
 }
@@ -616,14 +669,6 @@ static struct {
     int64_t last_up_s;         // uptime of the last note, -1 = none this boot
 } W = {.last = "", .last_up_s = -1};
 
-// Lifetime counts, kept in flash (written only when the watchdog acts).
-#define WATCH_SAVE_VER 1
-static struct {
-    uint8_t ver;
-    uint32_t reinits, fixed, restarts;
-    char last[128];
-} WT = {.ver = WATCH_SAVE_VER};
-
 static void watch_note(const char * fmt, ...)
 {
     char buf[sizeof(W.last)];
@@ -638,7 +683,7 @@ static void watch_note(const char * fmt, ...)
     W.last_up_s = G->SYSTEM_MODULE.uptime_seconds;
     xSemaphoreGive(S.lock);
     ESP_LOGW(TAG, "domain watch: %s", buf);
-    if (changed) save_blob("watch", &WT, sizeof(WT));  // a repeated note (same text) doesn't wear the flash
+    if (changed) save_watch();  // a repeated note (same text) doesn't wear the flash
 }
 
 static bool watch_busy(void)
@@ -699,11 +744,15 @@ void AUTOTUNE_task(void * pvParameters)
     S.lock = xSemaphoreCreateMutex();
     int watch_dead_s = 0;
 
-    if (load_blob("watch", &WT, sizeof(WT)) && WT.ver == WATCH_SAVE_VER) {
-        WT.last[sizeof(WT.last) - 1] = 0;
-    } else {
-        memset(&WT, 0, sizeof(WT));
-        WT.ver = WATCH_SAVE_VER;
+    save_mx = xSemaphoreCreateMutex();
+    loaded = xSemaphoreCreateBinary();
+    // xTaskCreate puts the stack in internal RAM, which flash operations need.
+    if (!save_mx || !loaded || xTaskCreate(saver_task, "solo45 save", 6144, NULL, 3, &saver) != pdPASS) {
+        saver = NULL;
+        ESP_LOGE(TAG, "no saver task: tune results won't survive a restart");
+    } else if (xSemaphoreTake(loaded, 5000 / portTICK_PERIOD_MS) != pdTRUE) {
+        ESP_LOGW(TAG, "saved tune result not read in time");
+        res_loaded = false;
     }
 
     // A tune that was running at a reboot is not resumed: the saved settings
