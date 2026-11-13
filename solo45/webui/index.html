@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solo45 Miner</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ffb347'/%3E%3Ctext x='16' y='22' font-size='15' font-family='Arial' font-weight='700' text-anchor='middle' fill='%231b1205'%3E45%3C/text%3E%3C/svg%3E">
+<style>
+/* Solo45 Miner: the miner's own page. Header + tabs, tiles first, detail below. Dark first; system fonts only (works with no internet). */
+:root{
+  --bg:#0d1220;--panel:#151c2e;--panel2:#1c2540;--line:#2a3555;--fg:#e8ecf7;--muted:#97a2c0;--accent:#ffb347;--on-accent:#1b1205;
+  --t-hash:#3fd0a0;--t-power:#ffb347;--t-chip:#ff7a8a;--t-vr:#b48cff;--t-fan:#4fb3ff;--t-best:#ffd84f;
+  --good:#38d39f;--warn:#ffc44d;--bad:#ff5d6c;
+  --log:#d9944a;   /* soft orange log text, easier on the eyes than white */
+  --f-head:"Segoe UI Semibold","SF Pro Display",system-ui,-apple-system,Roboto,sans-serif;
+  --f-body:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --f-data:ui-monospace,"Cascadia Mono","SF Mono",Consolas,Menlo,monospace;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){:root{
+  --bg:#f3f5fb;--panel:#fff;--panel2:#eef1f9;--line:#d7ddec;--fg:#141a2b;--muted:#5b6582;--accent:#d97b00;--on-accent:#fff;
+  --t-hash:#0f9d72;--t-power:#c97400;--t-chip:#d6384c;--t-vr:#7a4fd6;--t-fan:#1f7fd1;--t-best:#a88400;
+  --good:#12a174;--warn:#c98a00;--bad:#d6384c;--log:#9a5a12;color-scheme:light}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.5}
+.wrap{max-width:1100px;margin:0 auto;padding:16px 16px 48px;display:flex;flex-direction:column;gap:16px}
+.wrap>*,.tabp{min-width:0}
+.tabp{display:flex;flex-direction:column;gap:12px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px}
+.logo{font-family:var(--f-head);font-weight:700;font-size:22px;line-height:1.2}
+.logo b{color:var(--accent)}
+.logo small{display:block;font-family:var(--f-data);font-size:11px;font-weight:400;color:var(--muted)}
+.pills{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}
+.pill{font-size:12px;border-radius:99px;padding:3px 10px;border:1px solid var(--line);background:var(--panel);white-space:nowrap}
+.pill.ok{color:var(--good)}.pill.warn{color:var(--warn)}.pill.bad{color:var(--bad)}
+.tabs{display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--line)}
+.tabs button{font:inherit;color:var(--muted);background:none;border:0;border-bottom:2px solid transparent;padding:9px 14px;cursor:pointer;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h2{font-family:var(--f-head);font-size:18px;margin:0}
+h3{font-family:var(--f-head);font-size:15px;margin:0}
+.sub{color:var(--muted);font-size:13px;margin:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:6px;min-width:0;position:relative;overflow:hidden}
+.tile::before{content:"";position:absolute;inset:0 0 auto;height:3px;background:var(--c)}
+.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.val{font-family:var(--f-data);font-size:24px;font-weight:600;color:var(--c);font-variant-numeric:tabular-nums}
+.val small{font-size:13px;color:var(--muted);font-weight:400;margin-left:3px}
+.meta{font-size:12px;color:var(--muted)}
+.bar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--c);border-radius:3px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13px;margin:0}
+.kv dt{color:var(--muted)}.kv dd{margin:0;font-family:var(--f-data);text-align:right;overflow-wrap:anywhere}
+.hrow{display:flex;align-items:center;gap:10px;font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--c);flex:none;display:inline-block}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{font-weight:500;color:var(--muted);text-align:left;font-size:12px;padding:6px 8px;white-space:nowrap}
+td{padding:6px 8px;border-top:1px solid var(--line);font-family:var(--f-data);font-variant-numeric:tabular-nums;white-space:nowrap}
+td.cell{padding:4px}
+.dom{border-radius:7px;padding:8px 6px;text-align:center;min-width:64px;background:color-mix(in srgb,var(--c) 22%,var(--panel));border:1px solid color-mix(in srgb,var(--c) 55%,transparent)}
+.dom b{display:block;font-size:14px}.dom span{font-size:11px;color:var(--muted)}
+.err{color:var(--c);font-weight:600}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted)}
+.legend span{display:flex;align-items:center;gap:6px}
+.callout{border-left:3px solid var(--c);background:color-mix(in srgb,var(--c) 10%,var(--panel));padding:10px 12px;border-radius:0 8px 8px 0;font-size:13px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+label.chk{flex-direction:row;align-items:center;gap:8px;font-size:13px;color:var(--fg)}
+input,select{font:inherit;font-family:var(--f-data);color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;width:120px;max-width:100%}
+input.wide{width:260px}
+input[type=checkbox]{width:auto}
+.seg{display:flex;gap:4px;background:var(--panel2);border-radius:9px;padding:3px}
+.seg button{font:inherit;color:var(--muted);background:none;border:0;border-radius:7px;padding:6px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--panel);color:var(--fg)}
+.btn{font:inherit;font-weight:600;border:0;border-radius:9px;padding:9px 18px;cursor:pointer;background:var(--accent);color:var(--on-accent)}
+.btn.ghost{background:var(--panel2);color:var(--fg);border:1px solid var(--line)}
+.btn.danger{background:var(--bad);color:#fff}
+.btn:disabled{opacity:.5;cursor:default}
+.status{font-family:var(--f-data);font-size:13px;padding:10px 12px;border-radius:8px;background:var(--panel2);overflow-wrap:anywhere}
+.msg{font-size:13px;min-height:20px}
+.msg.ok{color:var(--good)}.msg.bad{color:var(--bad)}
+svg text{fill:var(--muted);font-family:var(--f-data);font-size:11px}
+tr.best td{color:var(--accent)}
+.banner{background:var(--t-best);color:#1b1205;border-radius:12px;padding:14px 16px;font-weight:600;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+.offline{background:var(--bad);color:#fff;border-radius:10px;padding:8px 12px;font-size:13px}
+.logbox{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;height:60vh;min-height:280px;overflow:auto;font-family:var(--f-data);font-size:12px;line-height:1.45;color:var(--log);white-space:pre-wrap;overflow-wrap:anywhere}
+.logbox .lw{color:var(--warn)}.logbox .le{color:var(--bad)}.logbox .ln{color:var(--muted)}
+.dom,.chiprow{cursor:help}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><b>Solo45</b> <span id="hn">Miner</span><small id="sub">connecting…</small></div>
+    <div class="pills" id="pills"></div>
+  </header>
+  <div class="offline" id="offline" hidden>The miner is not answering. Retrying every 5 seconds.</div>
+  <div class="banner" id="block" hidden><span>🎉 This miner found a block!</span><button class="btn ghost" id="blockDismiss">Dismiss</button></div>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button role="tab" data-tab="chips" aria-selected="false">Chips &amp; domains</button>
+    <button role="tab" data-tab="tune" aria-selected="false">Auto-tune</button>
+    <button role="tab" data-tab="pool" aria-selected="false">Pool</button>
+    <button role="tab" data-tab="setup" aria-selected="false">Miner setup</button>
+    <button role="tab" data-tab="logs" aria-selected="false">Logs</button>
+  </nav>
+
+  <!-- OVERVIEW -->
+  <section id="p-overview" class="tabp">
+    <div class="tiles" id="tiles"></div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><h3>Last hour (while this page is open)</h3><div class="legend"><span><i class="dot" style="--c:var(--t-hash)"></i>GH/s</span><span><i class="dot" style="--c:var(--t-chip)"></i>chip °C</span></div></div>
+      <div id="chart"></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Health at a glance</h3><div id="health" style="display:flex;flex-direction:column;gap:8px"></div></div>
+      <div class="card"><h3>Running settings</h3><dl class="kv" id="running"></dl></div>
+    </div>
+  </section>
+
+  <!-- CHIPS -->
+  <section id="p-chips" class="tabp" hidden>
+    <div class="card">
+      <div><h2>Chips &amp; domains</h2><p class="sub" id="chipsSub"></p></div>
+      <div class="scroll"><table><thead id="chipsHead"></thead><tbody id="chipsBody"></tbody></table></div>
+      <div class="legend">
+        <span><i class="dot" style="--c:var(--good)"></i>70% or more of its share</span>
+        <span><i class="dot" style="--c:var(--warn)"></i>25–70%: weak</span>
+        <span><i class="dot" style="--c:var(--bad)"></i>under 25%: stalled</span>
+      </div>
+      <div id="chipsCall"></div>
+      <p class="sub">The chip counts errors per chip, not per domain, so errors have their own column. Errors per minute are measured by this page over the last 2 minutes. Domain hashrate shows a weak or stalled domain as a yellow or red tile.</p>
+    </div>
+  </section>
+
+  <!-- TUNE -->
+  <section id="p-tune" class="tabp" hidden>
+    <div class="grid2">
+      <div class="card">
+        <div><h2>Auto-tune</h2><p class="sub">Steps the clock up 25 MHz at a time, finds the lowest clean voltage at each step, then checks the best point for 10 minutes before saving it. If anything looks wrong it puts the old settings back.</p></div>
+        <div class="row">
+          <label>Goal<div class="seg" role="group" aria-label="Goal"><button id="g1" aria-pressed="true">Most hashrate</button><button id="g2" aria-pressed="false">Best efficiency</button></div></label>
+        </div>
+        <div class="row">
+          <label for="tcap">Watt cap<input id="tcap" type="number" min="5" max="400"></label>
+          <label for="tmv">Max voltage (mV, 0 = auto)<input id="tmv" type="number" min="0" max="1400" step="10"></label>
+          <label for="terr">Max errors %<input id="terr" type="number" min="0.1" max="5" step="0.1"></label>
+        </div>
+        <div class="row"><button class="btn" id="tstart">Start tune</button><button class="btn ghost" id="tstop">Stop</button></div>
+        <div class="msg" id="tmsg" role="status"></div>
+        <div class="status" id="tstatus">No tune has run yet.</div>
+      </div>
+      <div class="card">
+        <h3>Clean points found</h3>
+        <div id="tchart"></div>
+        <div class="scroll"><table><thead><tr><th>MHz</th><th>mV</th><th>GH/s</th><th>W</th><th>J/TH</th><th>chip °C</th><th>fan</th><th></th></tr></thead><tbody id="tpts"></tbody></table></div>
+      </div>
+      <div class="card">
+        <div><h3>Domain watchdog</h3><p class="sub">When no tune is running, it watches every hash domain. If one sits under 25% for 2 minutes, it pauses the chip for 5 seconds to bring it back (at most 3 times in 6 hours), and restarts the miner only if that fails.</p></div>
+        <div id="twatch"><div class="status">Needs Solo45 firmware tune7 or later.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- POOL -->
+  <section id="p-pool" class="tabp" hidden>
+    <div class="grid2">
+      <div class="card"><h2>Pool</h2><dl class="kv" id="poolkv"></dl></div>
+      <div class="card">
+        <h3>Change pools</h3>
+        <p class="sub">Leave a password empty to keep the one saved now.</p>
+        <div id="poolForms"></div>
+        <div class="row"><button class="btn" id="psave">Save pools</button><button class="btn ghost" id="preload">Reload</button></div>
+        <div class="msg" id="pmsg" role="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SETUP -->
+  <section id="p-setup" class="tabp" hidden>
+    <div class="grid2">
+      <div class="card">
+        <h2>Clock, voltage &amp; fan</h2>
+        <div class="row">
+          <label for="sfreq">Clock MHz<input id="sfreq" type="number" min="400" max="1200" step="25"></label>
+          <label for="smv">Core mV<input id="smv" type="number" min="1000" max="1400" step="5"></label>
+        </div>
+        <div class="row">
+          <label class="chk"><input id="sauto" type="checkbox"> Auto fan</label>
+          <label for="starget">Fan target °C<input id="starget" type="number" min="35" max="75"></label>
+          <label for="smin">Min fan %<input id="smin" type="number" min="0" max="100"></label>
+          <label for="sman">Manual fan %<input id="sman" type="number" min="0" max="100"></label>
+        </div>
+        <div class="row"><label for="shost">Name on the network<input id="shost" class="wide" maxlength="32"></label></div>
+        <div class="row"><button class="btn" id="ssave">Save</button><button class="btn ghost" id="sreload">Reload</button></div>
+        <div class="msg" id="smsg" role="status"></div>
+        <p class="sub">Clock and voltage apply right away. Min fan and the name take effect after a restart. The heat throttle is always on: it lowers the clock when the chip runs hot and brings it back when it cools.</p>
+      </div>
+      <div class="card">
+        <h2>Miner</h2>
+        <dl class="kv" id="fwkv"></dl>
+        <div class="row">
+          <button class="btn ghost" id="restart">Restart</button>
+          <button class="btn ghost" id="identify">Identify</button>
+          <button class="btn ghost" id="pause">Pause mining</button>
+        </div>
+        <h3>Back up &amp; restore</h3>
+        <p class="sub">The backup holds clock, voltage, fan, name, pools and tune limits. It never holds the Wi-Fi password or pool passwords.</p>
+        <div class="row">
+          <button class="btn ghost" id="backup">Download backup</button>
+          <label class="btn ghost" for="restoreFile" style="flex-direction:row">Restore…<input id="restoreFile" type="file" accept=".json" hidden></label>
+        </div>
+        <h3>Update</h3>
+        <div class="row">
+          <label class="btn ghost" for="fwFile" style="flex-direction:row">Firmware (esp-miner .bin)…<input id="fwFile" type="file" accept=".bin" hidden></label>
+          <label class="btn ghost" for="wwwFile" style="flex-direction:row">This page (www.bin)…<input id="wwwFile" type="file" accept=".bin" hidden></label>
+        </div>
+        <div class="row"><button class="btn ghost" id="stock">Switch back to the stock page</button></div>
+        <div class="msg" id="mmsg" role="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOGS -->
+  <section id="p-logs" class="tabp" hidden>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <div><h2>Live logs</h2><p class="sub" id="logState">Connects while this tab is open.</p></div>
+        <div class="row">
+          <label for="logFilter">Filter (case-sensitive)<input id="logFilter" class="wide" placeholder="e.g. asic_result or fan_controller"></label>
+          <button class="btn ghost" id="logPause">Pause</button>
+          <button class="btn ghost" id="logSave">Download</button>
+          <button class="btn ghost" id="logClear">Clear</button>
+        </div>
+      </div>
+      <pre id="logBox" class="logbox" aria-live="off"></pre>
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+const API = "";                       // same miner that serves the page
+const POLL_MS = 5000, HIST_MAX = 720; // 720 × 5 s = 1 hour
+const $ = s => document.querySelector(s);
+const fmt = (n,d=0) => (n==null||isNaN(n)) ? "–" : Number(n).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const diff = d => { if(!d) return "–"; const u=["","K","M","G","T","P"]; let i=0; while(d>=1000&&i<u.length-1){d/=1000;i++;} return fmt(d,d<10?2:d<100?1:0)+(u[i]?" "+u[i]:""); };
+const upt = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return (d?d+" d ":"")+h+" h "+m+" min"; };
+const domColor = p => p<25?"var(--bad)":p<70?"var(--warn)":"var(--good)";
+const rateColor = r => r==null?"var(--muted)":r>=10?"var(--bad)":r>=3?"var(--warn)":"var(--good)";
+
+let info = null, formsFilled = false, mode = 1, lastOk = 0;
+let hist = []; try { hist = JSON.parse(localStorage.getItem("s45hist")||"[]"); } catch(e) { hist = []; }
+const errWin = [];   // [{t, counts:[...]}] for the last 2 minutes
+const domWin = [];   // last few domain readings; one reading jumps around a lot, so tiles show a 30 s average
+const DOM_N = 6;
+
+async function api(path, opts={}) {
+  const r = await fetch(API+path, opts);
+  if (!r.ok) throw new Error((await r.text().catch(()=>""))||("HTTP "+r.status));
+  const ct = r.headers.get("content-type")||"";
+  return ct.includes("json") ? r.json() : r.text();
+}
+const patch = body => api("/api/system",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const post = path => api(path,{method:"POST"});
+function say(id, text, ok=true){ const m=$(id); m.textContent=text; m.className="msg "+(ok?"ok":"bad"); }
+
+// Two-click confirm for anything that changes the miner a lot.
+function confirmBtn(btn, label, fn){
+  let armed=false, t=null; const orig=btn.textContent;
+  btn.addEventListener("click", async () => {
+    if (!armed) { armed=true; btn.textContent=label; t=setTimeout(()=>{armed=false;btn.textContent=orig;},4000); return; }
+    clearTimeout(t); armed=false; btn.textContent=orig; btn.disabled=true;
+    try { await fn(); } finally { btn.disabled=false; }
+  });
+}
+
+/* ---------- polling ---------- */
+async function poll(){
+  try {
+    info = await api("/api/system/info");
+    lastOk = Date.now(); $("#offline").hidden = true;
+    const now = Date.now();
+    hist.push([now, Math.round(info.hashRate||0), +(info.temp||0).toFixed(1)]);
+    while (hist.length && (hist.length>HIST_MAX || now-hist[0][0]>3600e3)) hist.shift();
+    try { localStorage.setItem("s45hist", JSON.stringify(hist)); } catch(e) {}
+    const counts = chipList().map(c=>c.errorCount||0);
+    errWin.push({t:now, counts});
+    while (errWin.length>2 && now-errWin[0].t>120e3) errWin.shift();
+    domWin.push(chipList().map(c=>(c.domains||[]).slice()));
+    if (domWin.length>DOM_N) domWin.shift();
+    if (!formsFilled) { fillForms(); formsFilled = true; }
+    render();
+  } catch(e) {
+    if (Date.now()-lastOk > 12e3) $("#offline").hidden = false;
+  }
+}
+function chipList(){ return ((info&&info.hashrateMonitor)||{}).asics || []; }
+function errRates(){
+  // errors/min per chip over the window; null until 30 s of data, or after a counter reset
+  if (errWin.length<2) return chipList().map(()=>null);
+  const a=errWin[0], b=errWin[errWin.length-1], mins=(b.t-a.t)/60e3;
+  if (mins<0.5) return b.counts.map(()=>null);
+  return b.counts.map((c,i)=> (a.counts[i]==null||c<a.counts[i]) ? null : (c-a.counts[i])/mins);
+}
+function perDomExp(){ const n=chipList().length||1; return (info.expectedHashrate||0)/(n*4); }
+// Average of the last DOM_N readings per chip and domain (only over readings with the same layout).
+function domAvg(){
+  const lastShape = JSON.stringify((domWin[domWin.length-1]||[]).map(c=>c.length));
+  const ok = domWin.filter(s=>JSON.stringify(s.map(c=>c.length))===lastShape);
+  if (!ok.length) return [];
+  return ok[ok.length-1].map((c,i)=>c.map((_,j)=>ok.reduce((a,s)=>a+s[i][j],0)/ok.length));
+}
+
+/* ---------- render ---------- */
+function tile(c,lbl,val,unit,meta,pct){
+  return `<div class="tile" style="--c:var(${c})"><span class="lbl">${lbl}</span><span class="val">${val}<small>${unit}</small></span>${pct!=null?`<div class="bar"><i style="width:${Math.max(0,Math.min(100,pct))}%"></i></div>`:""}<span class="meta">${meta}</span></div>`;
+}
+function render(){
+  const d = info, chips = chipList(), rates = errRates(), e = perDomExp(), avg = domAvg();
+  const allDom = avg.flat();
+  const minDom = allDom.length && e ? Math.min(...allDom)/e*100 : null;
+  const known = rates.filter(r=>r!=null), totalRate = known.length ? known.reduce((a,b)=>a+b,0) : null;
+  const worst = rates.reduce((b,r,i)=> r!=null && (b<0 || r>rates[b]) ? i : b, -1);
+  const tune = d.solo45Tune || {};
+  const fallback = !!d.isUsingFallbackStratum;
+  const hot2 = d.temp2>0 ? d.temp2 : null;
+  const capW = d.solo45TuneMaxW || d.maxPower || 0;
+
+  document.title = (d.hostname||"Miner")+" · Solo45";
+  $("#hn").textContent = d.hostname || "Miner";
+  $("#sub").textContent = `${d.ASICModel||""} · board ${d.boardVersion||"?"} · ${d.version||""}`;
+
+  const p = [];
+  p.push(d.miningPaused ? `<span class="pill warn">Paused</span>` : fallback ? `<span class="pill warn">● On backup pool</span>` : `<span class="pill ok">● Mining</span>`);
+  if (minDom!=null) p.push(minDom<25 ? `<span class="pill bad">Domain stalled</span>` : `<span class="pill ok">${allDom.length}/${allDom.length} domains hashing</span>`);
+  if (worst>=0 && rates[worst]>=10) p.push(`<span class="pill bad">Chip ${worst+1}: ${fmt(rates[worst],1)} errors/min</span>`);
+  if (d.solo45ThrottleMhz) p.push(`<span class="pill warn">Heat throttle −${d.solo45ThrottleMhz} MHz</span>`);
+  if (tune.state==="running"||tune.state==="validating") p.push(`<span class="pill warn">Tuning…</span>`);
+  $("#pills").innerHTML = p.join("");
+  $("#block").hidden = !d.showNewBlock;
+
+  // tiles
+  const ghs=d.hashRate||0, exp=d.expectedHashrate||0;
+  $("#tiles").innerHTML =
+    tile("--t-hash","Hashrate",fmt(ghs/1000,2),"TH/s",`1 h avg ${fmt((d.hashRate_1h||0)/1000,2)} · ${exp?fmt(ghs/exp*100):"–"}% of expected`, exp?ghs/exp*100:null)+
+    tile("--t-power","Power",fmt(d.power,1),"W",`${ghs?fmt(d.power/(ghs/1000),1):"–"} J/TH · ${fmt((d.voltage||0)/1000,2)} V in${capW?` · ${d.solo45TuneMaxW?"tune cap":"board max"} ${capW} W`:""}`, capW?d.power/capW*100:null)+
+    tile("--t-chip","Chip temp",fmt(hot2||d.temp,1),"°C",`fan target ${d.temptarget} °C`, (hot2||d.temp)/75*100)+
+    tile("--t-vr","VR temp",fmt(d.vrTemp),"°C","limit 85 °C", d.vrTemp/85*100)+
+    tile("--t-fan","Fan",fmt(d.fanspeed),"%",`${d.fanrpm?fmt(d.fanrpm)+" rpm · ":""}${d.autofanspeed?"auto":"manual"}`, d.fanspeed)+
+    tile("--t-best","Best share",diff(d.bestDiff),"",`this session ${diff(d.bestSessionDiff)}`);
+
+  $("#health").innerHTML = [
+    [domColor(minDom==null?100:minDom), minDom==null?"No domain data yet":`Weakest domain at ${fmt(minDom)}% of its share`],
+    [rateColor(totalRate), totalRate==null?"Measuring chip errors (needs 30 s)…":`${fmt(totalRate,1)} chip errors/min · ${fmt(d.errorPercentage,2)}% of work${totalRate>=10?" (see Chips & domains)":""}`],
+    [d.solo45ThrottleMhz?"var(--warn)":"var(--good)", d.solo45ThrottleMhz?`Heat throttle: running ${d.actualFrequency} MHz (set ${d.frequency})`:"No heat throttle"],
+    [d.sharesRejected?"var(--warn)":"var(--good)", `${fmt(d.sharesAccepted)} shares accepted, ${fmt(d.sharesRejected)} rejected`],
+    [d.wifiRSSI>-70?"var(--good)":"var(--warn)", `Wi-Fi signal ${d.wifiRSSI} dBm`]
+  ].map(([c,t])=>`<div class="hrow" style="--c:${c}"><span class="dot"></span>${esc(t)}</div>`).join("");
+
+  $("#running").innerHTML = kv([
+    ["Clock", `${d.frequency} MHz${d.actualFrequency&&d.actualFrequency!==d.frequency?` (running ${d.actualFrequency})`:""}`],
+    ["Core voltage", `${d.coreVoltage} mV (reads ${d.coreVoltageActual})`],
+    ["Chips", `${chips.length||"?"} × ${d.ASICModel||""}`],
+    ["Uptime", upt(d.uptimeSeconds||0)],
+    ["Best share ever", diff(d.bestDiff)]
+  ]);
+  $("#chart").innerHTML = histChart();
+
+  renderChips(chips, rates, e, worst, avg);
+  renderTune(tune);
+  renderPool(d);
+  $("#fwkv").innerHTML = kv([
+    ["Firmware", d.version], ["Board", `${d.boardVersion} · ${d.ASICModel}`], ["Page", d.useCustomWWW?"Solo45 page":"stock page"],
+    ["Wi-Fi", `${d.wifiStatus||""} · ${d.wifiRSSI} dBm`], ["Free memory", `${fmt((d.freeHeap||0)/1024)} KB`], ["Restart reason", d.resetReason||"–"]
+  ]);
+  $("#pause").textContent = d.miningPaused ? "Resume mining" : "Pause mining";
+}
+function kv(rows){ return rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join(""); }
+
+function histChart(){
+  if (hist.length<2) return `<p class="sub">Collecting… the chart fills in while this page is open.</p>`;
+  const W=900,H=200,L=50,R=44,T=12,B=26;
+  const t0=hist[0][0], t1=hist[hist.length-1][0];
+  const hs=hist.map(h=>h[1]), cs=hist.map(h=>h[2]).filter(c=>c>0);
+  const hMax=Math.max(...hs), step=hMax>3000?1000:hMax>1500?500:250, hTop=Math.max(step,Math.ceil(hMax*1.1/step)*step);
+  const cLo=Math.floor((Math.min(...cs,40)-5)/10)*10, cHi=Math.ceil((Math.max(...cs,60)+5)/10)*10;
+  const X=t=>L+(t-t0)/Math.max(1,t1-t0)*(W-L-R), Yh=v=>T+(1-v/hTop)*(H-T-B), Yc=v=>T+(1-(v-cLo)/(cHi-cLo))*(H-T-B);
+  let g="";
+  for(let v=0; v<=hTop; v+=step) g+=`<line x1="${L}" x2="${W-R}" y1="${Yh(v)}" y2="${Yh(v)}" stroke="var(--line)"/><text x="${L-6}" y="${Yh(v)+4}" text-anchor="end">${fmt(v)}</text>`;
+  for(let v=cLo; v<=cHi; v+=10) g+=`<text x="${W-R+6}" y="${Yc(v)+4}">${v}°</text>`;
+  const mins=Math.round((t1-t0)/60e3); g+=`<text x="${L}" y="${H-6}">${mins} min ago</text><text x="${W-R}" y="${H-6}" text-anchor="end">now</text>`;
+  const ph=hist.map((h,i)=>`${i?"L":"M"}${X(h[0]).toFixed(1)},${Yh(h[1]).toFixed(1)}`).join("");
+  const area=`${ph}L${X(t1)},${Yh(0)}L${X(t0)},${Yh(0)}Z`;
+  const pc=hist.filter(h=>h[2]>0).map((h,i)=>`${i?"L":"M"}${X(h[0]).toFixed(1)},${Yc(h[2]).toFixed(1)}`).join("");
+  const last=hist[hist.length-1];
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Hashrate and chip temperature">${g}
+    <path d="${area}" fill="var(--t-hash)" fill-opacity=".12"/><path d="${ph}" fill="none" stroke="var(--t-hash)" stroke-width="1.6"/>
+    <path d="${pc}" fill="none" stroke="var(--t-chip)" stroke-width="1.4"/>
+    <circle cx="${X(last[0])}" cy="${Yh(last[1])}" r="3.5" fill="var(--t-hash)"/></svg>`;
+}
+
+function renderChips(chips, rates, e, worst, avg){
+  $("#chipsSub").textContent = `${chips.length} chip${chips.length===1?"":"s"}, 4 hash domains each. Each tile is the domain's hashrate (30-second average) and its % of an even share (${fmt(e)} GH/s).`;
+  $("#chipsHead").innerHTML = `<tr><th>Chip</th><th>Domain 1</th><th>Domain 2</th><th>Domain 3</th><th>Domain 4</th><th>GH/s</th><th>Errors/min</th><th>Errors total</th></tr>`;
+  $("#chipsBody").innerHTML = chips.map((c,i)=>{
+    const r=rates[i];
+    const tip=`Chip ${i+1} · error count ${fmt(c.errorCount)} · ${r==null?"errors/min measuring":fmt(r,1)+" errors/min"} · ${fmt(c.total)} GH/s\n(the chip counts errors for the whole chip, not per domain)`;
+    const cells=(avg[i]||c.domains||[]).map((dv,j)=>{const pc=e?dv/e*100:0;return `<td class="cell"><div class="dom" style="--c:${domColor(pc)}" title="Domain ${j+1}: ${fmt(dv)} GH/s (${fmt(pc)}% of its share)\n${esc(tip)}"><b>${fmt(dv)}</b><span>${fmt(pc)}%</span></div></td>`;}).join("");
+    return `<tr class="chiprow" title="${esc(tip)}"><td>Chip ${i+1}</td>${cells}<td>${fmt(c.total)}</td><td class="err" style="--c:${rateColor(r)}">${r==null?"measuring":fmt(r,1)}</td><td>${fmt(c.errorCount)}</td></tr>`;
+  }).join("");
+  const others = rates.filter((r,i)=>i!==worst&&r!=null).reduce((a,b)=>a+b,0);
+  let call;
+  if (worst>=0 && rates[worst]>=10)
+    call = `<div class="callout" style="--c:var(--bad)"><b>Chip ${worst+1}</b> makes ${fmt(rates[worst],1)} errors/min${chips.length>1?` (all the others together: ${fmt(others,1)})`:""}. If its domains still hash normally, the cause is the chip or its clock, not one domain. Fix ideas: a little more voltage or a lower clock.</div>`;
+  else if (rates.every(r=>r==null))
+    call = `<div class="callout" style="--c:var(--muted)">Measuring errors per minute. It needs about 30 seconds.</div>`;
+  else
+    call = `<div class="callout" style="--c:var(--good)">No chip is making many errors right now.</div>`;
+  $("#chipsCall").innerHTML = call;
+}
+
+function renderTune(t){
+  const st = t.state || "idle";
+  const busy = st==="running"||st==="validating";
+  $("#tstatus").innerHTML = `State: <b style="color:${st==="done"?"var(--good)":st==="failed"?"var(--bad)":busy?"var(--warn)":"var(--muted)"}">${esc(st)}</b>${t.message?"<br>"+esc(t.message):""}`+
+    (t.trials?`<br>Trials ${t.trials}${t.testingMhz&&busy?` · testing ${t.testingMhz} MHz / ${t.testingMv} mV`:""}`:"")+
+    (t.domainStops?`<br>Domain stops ${t.domainStops} · voltage floor ${t.domainFloorMv} mV`:"")+
+    (t.fromSave?`<br><span style="color:var(--muted)">Result kept from before the last restart.</span>`:"");
+  $("#tstart").disabled = busy; $("#tstop").disabled = !busy;
+  renderWatch(t);
+  const pts = t.points || [];
+  $("#tpts").innerHTML = pts.map((q,i)=>`<tr class="${i===t.best?"best":""}"><td>${q.mhz}</td><td>${q.mv}</td><td>${fmt(q.ghs)}</td><td>${fmt(q.w,1)}</td><td>${fmt(q.jth,1)}</td><td>${fmt(q.chip,1)}</td><td>${fmt(q.fan)}%</td><td>${i===t.best?"best":""}</td></tr>`).join("") || `<tr><td colspan="8" style="color:var(--muted)">No points yet.</td></tr>`;
+  $("#tchart").innerHTML = pts.length>1 ? tuneChart(pts, t.best) : "";
+}
+function ago(s){
+  if (s < 90) return `${Math.round(s)} s ago`;
+  if (s < 5400) return `${Math.round(s/60)} min ago`;
+  if (s < 172800) return `${fmt(s/3600,1)} h ago`;
+  return `${fmt(s/86400,1)} days ago`;
+}
+function renderWatch(t){
+  if (t.watchReinits === undefined) return;
+  const tot = t.watchReinitsTotal !== undefined;
+  const now = t.watchReinits, fixedNow = t.watchFixed || 0;
+  const last = t.watchLast || "", lastEver = t.watchLastEver || "";
+  let when = "never";
+  if (last && t.watchLastAgoS >= 0) when = `${ago(t.watchLastAgoS)}: ${last}`;
+  else if (lastEver) when = `before the last restart: ${lastEver}`;
+  const good = !now && !(tot && t.watchReinitsTotal);
+  const head = good
+    ? `<div class="callout" style="--c:var(--good)">It hasn't had to step in. Every domain has kept hashing.</div>`
+    : `<div class="callout" style="--c:var(--warn)">It has re-initialised a stalled domain ${tot?t.watchReinitsTotal:now} time${(tot?t.watchReinitsTotal:now)===1?"":"s"}.</div>`;
+  $("#twatch").innerHTML = head + `<dl class="kv">` + kv([
+    ["Since this restart", `${now} re-init${now===1?"":"s"}, ${fixedNow} fixed`],
+    ...(tot ? [["All time", `${t.watchReinitsTotal} re-init${t.watchReinitsTotal===1?"":"s"}, ${t.watchFixedTotal} fixed, ${t.watchRestartsTotal} restart${t.watchRestartsTotal===1?"":"s"}`]] : []),
+    ["Last acted", when],
+    ["Up for", ago(info.uptimeSeconds||0).replace(" ago","")]
+  ]) + `</dl>`;
+}
+function tuneChart(P, best){
+  const W=560,H=210,L=50,R=16,T=14,B=30;
+  const xs=P.map(p=>p.mhz), ys=P.map(p=>p.ghs), x0=Math.min(...xs), x1=Math.max(...xs);
+  const span=Math.max(...ys)-Math.min(...ys), step=span>1500?1000:span>600?250:100;
+  const y0=Math.floor(Math.min(...ys)/step)*step, y1=Math.ceil(Math.max(...ys)/step)*step||y0+step;
+  const X=v=>L+(v-x0)/Math.max(1,x1-x0)*(W-L-R), Y=v=>T+(1-(v-y0)/Math.max(1,y1-y0))*(H-T-B);
+  let g=""; for(let v=y0; v<=y1; v+=step) g+=`<line x1="${L}" x2="${W-R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L-6}" y="${Y(v)+4}" text-anchor="end">${fmt(v)}</text>`;
+  const sorted=[...P].sort((a,b)=>a.mhz-b.mhz);
+  const labelEvery=Math.ceil(sorted.length/8);
+  sorted.forEach((p,i)=>{ if(i%labelEvery===0||i===sorted.length-1) g+=`<text x="${X(p.mhz)}" y="${H-10}" text-anchor="middle">${p.mhz}</text>`; });
+  const path=sorted.map((p,i)=>`${i?"L":"M"}${X(p.mhz)},${Y(p.ghs)}`).join("");
+  const dots=P.map((p,i)=>`<circle cx="${X(p.mhz)}" cy="${Y(p.ghs)}" r="${i===best?6:3.5}" fill="${i===best?"var(--accent)":"var(--t-hash)"}"/>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Hashrate at each tested clock">${g}<path d="${path}" fill="none" stroke="var(--t-hash)" stroke-width="2"/>${dots}<text x="4" y="${H-10}">MHz</text></svg>`;
+}
+
+function renderPool(d){
+  const pools=d.pools||[], pri=pools.find(p=>p.id===d.primaryPoolIndex)||pools[0]||{}, sec=pools.find(p=>p.id===d.secondaryPoolIndex)||pools[1]||{};
+  $("#poolkv").innerHTML = kv([
+    ["Now on", d.isUsingFallbackStratum?"backup pool":"main pool"],
+    ["Main pool", pri.stratumURL?`${pri.stratumURL}:${pri.stratumPort}`:"–"],
+    ["Backup pool", sec.stratumURL?`${sec.stratumURL}:${sec.stratumPort}`:"–"],
+    ["Reply time", `${fmt(d.responseTime,1)} ms`],
+    ["Pool difficulty", diff(d.poolDifficulty)],
+    ["Accepted / rejected", `${fmt(d.sharesAccepted)} / ${fmt(d.sharesRejected)}`],
+    ["Block height", fmt(d.blockHeight)],
+    ["Network difficulty", diff(d.networkDifficulty)],
+    ["Coinbase tag", d.scriptsig||"–"]
+  ]);
+}
+
+/* ---------- forms ---------- */
+function fillForms(){
+  const d=info;
+  $("#sfreq").value=d.frequency; $("#smv").value=d.coreVoltage; $("#sauto").checked=!!d.autofanspeed;
+  $("#starget").value=d.temptarget; $("#smin").value=d.minFanSpeed; $("#sman").value=d.manualFanSpeed; $("#shost").value=d.hostname||"";
+  $("#tcap").value = d.solo45TuneMaxW || Math.round((d.maxPower||30)*0.9);
+  $("#tmv").value = d.solo45TuneMaxMv || 0;
+  $("#terr").value = d.solo45TuneMaxErr ? d.solo45TuneMaxErr/10 : 1.0;
+  const pools=d.pools||[];
+  $("#poolForms").innerHTML = [["Main",d.primaryPoolIndex],["Backup",d.secondaryPoolIndex]].map(([name,id])=>{
+    const p=pools.find(x=>x.id===id); if(!p) return "";
+    return `<fieldset data-id="${id}" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;margin:0"><legend class="lbl">${name} pool</legend>
+      <div class="row"><label>Address<input class="wide" data-f="stratumURL" value="${esc(p.stratumURL)}"></label><label>Port<input data-f="stratumPort" type="number" min="1" max="65535" value="${esc(p.stratumPort)}"></label></div>
+      <div class="row"><label>Worker (payout address.name)<input class="wide" data-f="stratumUser" value="${esc(p.stratumUser)}"></label><label>Password<input data-f="stratumPassword" type="password" autocomplete="off" placeholder="unchanged"></label></div></fieldset>`;
+  }).join("");
+}
+$("#sreload").onclick=()=>{ if(info){fillForms(); say("#smsg","Reloaded from the miner.");} };
+$("#preload").onclick=()=>{ if(info){fillForms(); say("#pmsg","Reloaded from the miner.");} };
+
+$("#ssave").onclick = async () => {
+  const d=info, body={};
+  const f=+$("#sfreq").value, v=+$("#smv").value;
+  if (!(f>=400&&f<=1200)) return say("#smsg","Clock must be 400–1200 MHz.",false);
+  if (!(v>=1000&&v<=1400)) return say("#smsg","Voltage must be 1000–1400 mV.",false);
+  if (f!==d.frequency) body.frequency=f;
+  if (v!==d.coreVoltage) body.coreVoltage=v;
+  if ($("#sauto").checked!==!!d.autofanspeed) body.autofanspeed=$("#sauto").checked?1:0;
+  for (const [id,key] of [["#starget","temptarget"],["#smin","minFanSpeed"],["#sman","manualFanSpeed"]]) { const x=+$(id).value; if (x!==d[key]) body[key]=x; }
+  const h=$("#shost").value.trim(); if (h && h!==d.hostname) body.hostname=h;
+  if (!Object.keys(body).length) return say("#smsg","Nothing changed.");
+  if ((body.frequency && body.frequency-d.frequency>100) || (body.coreVoltage && body.coreVoltage-d.coreVoltage>50)) {
+    if ($("#ssave").dataset.armed!=="1") { $("#ssave").dataset.armed="1"; $("#ssave").textContent="Big jump, click again"; setTimeout(()=>{$("#ssave").dataset.armed="";$("#ssave").textContent="Save";},4000); return; }
+  }
+  $("#ssave").dataset.armed=""; $("#ssave").textContent="Save";
+  try { await patch(body); say("#smsg","Saved: "+Object.entries(body).map(([k,x])=>k+" "+x).join(", ")); setTimeout(async()=>{await poll(); fillForms();},1500); }
+  catch(e){ say("#smsg","Not saved: "+e.message,false); }
+};
+
+$("#psave").onclick = async () => {
+  const pools=(info.pools||[]).map(p=>{ const q={...p}; delete q.stratumPassword; return q; });
+  for (const fs of document.querySelectorAll("#poolForms fieldset")) {
+    const q=pools.find(p=>p.id===+fs.dataset.id); if(!q) continue;
+    for (const inp of fs.querySelectorAll("input")) {
+      const k=inp.dataset.f, val=inp.value.trim();
+      if (k==="stratumPassword") { if (val) q.stratumPassword=val; continue; }
+      if (k==="stratumPort") { const n=+val; if(!(n>=1&&n<=65535)) return say("#pmsg","Port must be 1–65535.",false); q[k]=n; continue; }
+      if (k==="stratumURL" && !val) return say("#pmsg","A pool address can't be empty.",false);
+      q[k]=val;
+    }
+  }
+  try { await patch({pools}); say("#pmsg","Pools saved. The miner reconnects on its own; restart it if it doesn't."); setTimeout(async()=>{await poll(); fillForms();},1500); }
+  catch(e){ say("#pmsg","Not saved: "+e.message,false); }
+};
+
+/* tune */
+function setMode(m){ mode=m; $("#g1").setAttribute("aria-pressed",m===1); $("#g2").setAttribute("aria-pressed",m===2); }
+$("#g1").onclick=()=>setMode(1); $("#g2").onclick=()=>setMode(2);
+confirmBtn($("#tstart"),"Click again to start", async () => {
+  const w=+$("#tcap").value, mv=+$("#tmv").value, er=+$("#terr").value;
+  if (!(w>=5&&w<=400)) return say("#tmsg","Watt cap must be 5–400 W.",false);
+  if (!(mv===0||(mv>=1000&&mv<=1400))) return say("#tmsg","Max voltage must be 0 (auto) or 1000–1400 mV.",false);
+  if (!(er>=0.1&&er<=5)) return say("#tmsg","Max errors must be 0.1–5%.",false);
+  try { await patch({solo45TuneMaxW:Math.round(w),solo45TuneMaxMv:Math.round(mv),solo45TuneMaxErr:Math.round(er*10),solo45TuneMode:mode});
+        say("#tmsg","Tune started. It takes 1–2 hours; you can close this page."); setTimeout(poll,1500); }
+  catch(e){ say("#tmsg","Not started: "+e.message,false); }
+});
+$("#tstop").onclick = async () => {
+  try { await patch({solo45TuneMode:0}); say("#tmsg","Stopping. The saved settings stay."); setTimeout(poll,1500); }
+  catch(e){ say("#tmsg","Could not stop: "+e.message,false); }
+};
+
+/* miner actions */
+confirmBtn($("#restart"),"Click again to restart", async () => { try { await post("/api/system/restart"); say("#mmsg","Restarting. The page reconnects by itself."); } catch(e){ say("#mmsg","Restart failed: "+e.message,false); } });
+$("#identify").onclick = async () => { try { await post("/api/system/identify"); say("#mmsg","The miner's screen and LED are flashing."); } catch(e){ say("#mmsg",e.message,false); } };
+confirmBtn($("#pause"),"Click again", async () => {
+  const resume=info&&info.miningPaused;
+  try { await post(resume?"/api/system/resume":"/api/system/pause"); say("#mmsg",resume?"Mining resumed.":"Mining paused."); setTimeout(poll,1000); } catch(e){ say("#mmsg",e.message,false); }
+});
+$("#blockDismiss").onclick = async () => { try { await post("/api/system/blockFound/dismiss"); $("#block").hidden=true; } catch(e){} };
+confirmBtn($("#stock"),"Click again: switch & restart", async () => {
+  try { await patch({useCustomWWW:0}); await post("/api/system/restart"); say("#mmsg","Switching to the stock page and restarting. Reload in a minute."); }
+  catch(e){ say("#mmsg","Could not switch: "+e.message,false); }
+});
+
+/* backup / restore */
+const BACKUP_KEYS=["frequency","coreVoltage","autofanspeed","temptarget","minFanSpeed","manualFanSpeed","hostname","solo45TuneMaxW","solo45TuneMaxMv","solo45TuneMaxErr"];
+$("#backup").onclick = () => {
+  const b={solo45Backup:1, saved:new Date().toISOString(), from:info.hostname, firmware:info.version};
+  for (const k of BACKUP_KEYS) if (info[k]!=null) b[k]=info[k];
+  b.pools=(info.pools||[]).map(p=>{const q={...p}; delete q.stratumPassword; return q;});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(b,null,2)],{type:"application/json"}));
+  a.download=`${info.hostname||"miner"}-settings-${new Date().toISOString().slice(0,10)}.json`; a.click();
+  say("#mmsg","Backup downloaded.");
+};
+$("#restoreFile").onchange = async ev => {
+  const f=ev.target.files[0]; ev.target.value=""; if(!f) return;
+  let b; try { b=JSON.parse(await f.text()); } catch(e){ return say("#mmsg","That file isn't a backup.",false); }
+  if (!b.solo45Backup) return say("#mmsg","That file isn't a Solo45 backup.",false);
+  const body={}; for (const k of BACKUP_KEYS) if (b[k]!=null) body[k]=b[k];
+  if (Array.isArray(b.pools)) body.pools=b.pools.map(p=>{const q={...p}; delete q.stratumPassword; return q;});
+  if (b.hostname && b.hostname!==info.hostname) delete body.hostname;   // a backup from another miner keeps this miner's name
+  try { await patch(body); say("#mmsg",`Restored ${Object.keys(body).length} settings from ${b.from||"backup"}. Restart to apply all of them.`); setTimeout(async()=>{await poll(); fillForms();},1500); }
+  catch(e){ say("#mmsg","Restore failed: "+e.message,false); }
+};
+
+/* firmware / page upload */
+function upload(path, file, what){
+  return new Promise((res,rej)=>{
+    const x=new XMLHttpRequest(); x.open("POST",API+path); x.setRequestHeader("Content-Type","application/octet-stream");
+    x.upload.onprogress=e=>{ if(e.lengthComputable) say("#mmsg",`Uploading ${what}: ${Math.round(e.loaded/e.total*100)}%`); };
+    x.onload=()=> x.status>=200&&x.status<300 ? res() : rej(new Error(x.responseText||("HTTP "+x.status)));
+    x.onerror=()=>rej(new Error("connection lost")); x.send(file);
+  });
+}
+$("#fwFile").onchange = async ev => {
+  const f=ev.target.files[0]; ev.target.value=""; if(!f) return;
+  if (/www/i.test(f.name)) return say("#mmsg","That looks like a page file (www.bin). Use the other button.",false);
+  if (f.size<1e6||f.size>4194304) return say("#mmsg","That file is the wrong size for firmware.",false);
+  try { await upload("/api/system/OTA", f, "firmware"); say("#mmsg","Firmware updated. The miner is restarting."); } catch(e){ say("#mmsg","Update failed: "+e.message,false); }
+};
+$("#wwwFile").onchange = async ev => {
+  const f=ev.target.files[0]; ev.target.value=""; if(!f) return;
+  if (f.size!==3145728) return say("#mmsg","A page file (www.bin) must be exactly 3 MB.",false);
+  try { await upload("/api/system/OTAWWW", f, "page"); say("#mmsg","Page updated. The miner is restarting."); } catch(e){ say("#mmsg","Update failed: "+e.message,false); }
+};
+
+/* logs: the miner streams its log over a WebSocket; connect only while the Logs tab is open */
+const LOG_MAX = 2000;
+let logWs = null, logLines = [], logPaused = false, logRetry = null, logWanted = false;
+const ansi = /\x1b\[[0-9;]*m/g;
+function logClass(s){ return /^E \(|\bE \(/.test(s) ? "le" : /^W \(|\bW \(/.test(s) ? "lw" : ""; }
+function logRender(){
+  const f=$("#logFilter").value, box=$("#logBox");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const rows = (f ? logLines.filter(l=>l.includes(f)) : logLines).slice(-800);
+  box.innerHTML = rows.map(l=>{ const c=logClass(l); return c?`<span class="${c}">${esc(l)}</span>`:esc(l); }).join("\n");
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+function logConnect(){
+  logWanted = true;
+  if (logWs) return;
+  clearTimeout(logRetry);
+  const wsHost = /^(localhost|127\.0\.0\.1)(:|$)/.test(location.host) ? (new URLSearchParams(location.search).get("ws") || location.host) : location.host; // ?ws= is only for testing on a PC
+  try { logWs = new WebSocket(`ws://${wsHost}/api/ws`); } catch(e) { logWs = null; return; }
+  $("#logState").textContent = "Connecting…";
+  logWs.onopen = () => { $("#logState").textContent = "Connected. New lines appear as the miner writes them."; };
+  logWs.onmessage = ev => {
+    const text = String(ev.data).replace(ansi,"");
+    for (const l of text.split(/\r?\n/)) if (l.trim()) logLines.push(l);
+    if (logLines.length > LOG_MAX) logLines.splice(0, logLines.length-LOG_MAX);
+    if (!logPaused) logRender();
+  };
+  logWs.onclose = () => {
+    logWs = null;
+    if (logWanted) { $("#logState").textContent = "Disconnected. Retrying in 5 s…"; logRetry = setTimeout(logConnect, 5000); }
+    else $("#logState").textContent = "Connects while this tab is open.";
+  };
+  logWs.onerror = () => {};
+}
+function logDisconnect(){ logWanted = false; clearTimeout(logRetry); if (logWs) { try { logWs.close(); } catch(e) {} logWs = null; } }
+$("#logFilter").addEventListener("input", logRender);
+$("#logPause").onclick = () => { logPaused=!logPaused; $("#logPause").textContent = logPaused?"Resume":"Pause"; if(!logPaused) logRender(); };
+$("#logClear").onclick = () => { logLines=[]; logRender(); };
+$("#logSave").onclick = () => {
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([logLines.join("\n")+"\n"],{type:"text/plain"}));
+  a.download=`${(info&&info.hostname)||"miner"}-log-${new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)}.txt`; a.click();
+};
+
+/* tabs */
+function showTab(name){
+  document.querySelectorAll(".tabs button").forEach(b=>b.setAttribute("aria-selected", b.dataset.tab===name));
+  document.querySelectorAll(".tabp").forEach(p=>p.hidden = p.id!=="p-"+name);
+  if (name==="logs") logConnect(); else logDisconnect();
+  try { localStorage.setItem("s45tab", name); } catch(e) {}
+}
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+{ let t=location.hash.slice(1); try { if (!t) t=localStorage.getItem("s45tab"); } catch(e) {} if (t && document.getElementById("p-"+t)) showTab(t); }
+
+poll(); setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

@@ -1,3 +1,16 @@
+# Solo45 ESP-Miner
+
+**A fork of [ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) v2.15.3 with Solo45 changes for the Bitaxe Gamma** (heat throttle, per-chip auto-tuner, stalled-domain watchdog, new web page). **Beta.**
+
+- What's new, and which boards: [solo45/README.md](solo45/README.md)
+- Install, and how to go back to stock: [solo45/INSTALL.md](solo45/INSTALL.md)
+- Downloads: [Releases](https://github.com/race45race/solo45-esp-miner/releases) (the files are also in [releases/tune9-beta1](releases/tune9-beta1))
+- Build: `git clone --recursive`, then ESP-IDF v6.0.2, `idf.py set-target esp32s3 build`
+
+The original ESP-Miner readme follows.
+
+---
+
 [![](https://dcbadge.vercel.app/api/server/3E8ca2dkcC)](https://discord.gg/osmu)
 
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/bitaxeorg/esp-miner/total)
