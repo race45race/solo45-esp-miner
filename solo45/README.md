@@ -9,6 +9,9 @@ and keeps everything else from stock AxeOS (pools, Wi-Fi, settings, API).
 > but only on Gamma 601/602 boards. Other boards (Supra, Ultra, Hex, GT, …) are **not tested**: please wait.
 > There is no automatic rollback: if a flash fails, you need a USB re-flash (see INSTALL.md).
 
+> ⚠️ **Install with the Bitaxe's own Settings → Update page only.** These are update files, not full flash
+> images: don't use the web flasher, esptool or any USB flasher with them.
+
 ## What's new compared with stock AxeOS 2.15.3
 
 **Heat**

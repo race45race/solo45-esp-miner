@@ -2,6 +2,10 @@
 
 **For Bitaxe Gamma 601 / 602 only.** Takes about 3 minutes. Your Wi-Fi, pools and settings are kept.
 
+> ⚠️ **Install with your Bitaxe's own Settings → Update page only.** These are *update* files, not full flash
+> images. **Don't use the Bitaxe web flasher, esptool or any USB flasher with them**: written to the start of
+> the chip, the miner won't boot until you re-flash the official factory image over USB.
+
 ## Before you start
 1. Check the checksums (Windows PowerShell: `Get-FileHash esp-miner-solo45-tune9.bin`; Mac/Linux: `shasum -a 256 *.bin`)
    against `SHA256SUMS.txt`. Don't flash if they differ.

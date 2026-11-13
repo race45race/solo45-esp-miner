@@ -4,6 +4,7 @@
 
 - What's new, and which boards: [solo45/README.md](solo45/README.md)
 - Install, and how to go back to stock: [solo45/INSTALL.md](solo45/INSTALL.md)
+- ⚠️ **Install with the Bitaxe's own Settings → Update page only.** These are update files, not full flash images: don't use the web flasher, esptool or any USB flasher with them.
 - Downloads: [Releases](https://github.com/race45race/solo45-esp-miner/releases) (the files are also in [releases/tune9-beta1](releases/tune9-beta1))
 - Build: `git clone --recursive`, then ESP-IDF v6.0.2, `idf.py set-target esp32s3 build`
 
